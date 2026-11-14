@@ -125,7 +125,57 @@ type CreateInput struct {
 //
 // The comment starts in the status chosen by the configured Moderator (pending
 // by default) and is returned as stored, including server-assigned fields.
+//
+// It issues no delete credential: callers that do (the HTTP transport, so the
+// author can take their comment back) use CreateWithCredential. Seed data and
+// tests take this path on purpose — a fixture has no author to hand a secret
+// to, and minting one per row would only create credentials nobody can use.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*Comment, error) {
+	c, err := s.prepareComment(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	return s.persist(ctx, c)
+}
+
+// CreateWithCredential is Create plus the author's deletion credential. The
+// token is returned in plaintext exactly once and is stored only as a digest,
+// so the caller must hand it to the author immediately or lose it.
+func (s *Service) CreateWithCredential(ctx context.Context, in CreateInput) (*Comment, string, error) {
+	token, err := newDeleteToken()
+	if err != nil {
+		return nil, "", err
+	}
+
+	c, err := s.prepareComment(ctx, in)
+	if err != nil {
+		return nil, "", err
+	}
+	c.DeleteTokenHash = hashDeleteToken(token)
+
+	saved, err := s.persist(ctx, c)
+	if err != nil {
+		return nil, "", err
+	}
+	return saved, token, nil
+}
+
+// persist stores a prepared comment and logs the outcome.
+func (s *Service) persist(ctx context.Context, c *Comment) (*Comment, error) {
+	if err := s.repo.Create(ctx, c); err != nil {
+		return nil, fmt.Errorf("store comment: %w", err)
+	}
+	s.logger.InfoContext(ctx, "comment created",
+		slog.String("comment_id", c.ID),
+		slog.String("post_slug", c.PostSlug),
+		slog.String("status", string(c.Status)),
+	)
+	return c.Clone(), nil
+}
+
+// store builds and reviews a comment without touching the repository. It is
+// the shared front half of both create paths.
+func (s *Service) prepareComment(ctx context.Context, in CreateInput) (*Comment, error) {
 	now := s.now().UTC()
 	c := &Comment{
 		ID:       s.ids.New(),
@@ -155,16 +205,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (*Comment, error) 
 		return nil, fmt.Errorf("review comment: %w", err)
 	}
 	c.Status = status
-
-	if err := s.repo.Create(ctx, c); err != nil {
-		return nil, fmt.Errorf("store comment: %w", err)
-	}
-	s.logger.InfoContext(ctx, "comment created",
-		slog.String("comment_id", c.ID),
-		slog.String("post_slug", c.PostSlug),
-		slog.String("status", string(c.Status)),
-	)
-	return c.Clone(), nil
+	return c, nil
 }
 
 // Get returns a single comment by ID.
@@ -191,6 +232,146 @@ func (s *Service) List(ctx context.Context, q Query) ([]*Comment, error) {
 	return comments, nil
 }
 
+// CountByPost reports how many comments each requested post has.
+//
+// Slugs are cleaned exactly like a listing request (trim, drop blanks,
+// deduplicate, keep the caller's order, cap the batch), and every slug that
+// survived cleaning appears in the result — posts without a single comment
+// included, with a count of zero. A caller rendering a list of cards needs to
+// tell "no comments yet" from "we did not ask", and a missing key cannot.
+//
+// Only approved comments are counted. A pending comment is not part of what
+// readers see, and a card promising three comments above a thread showing two
+// reads as a bug; undercounting until moderation catches up does not.
+func (s *Service) CountByPost(ctx context.Context, slugs []string) ([]PostCount, error) {
+	cleaned, err := cleanSlugs(slugs)
+	if err != nil {
+		return nil, fmt.Errorf("count comments: %w", err)
+	}
+
+	q := CountQuery{PostSlugs: cleaned, Status: StatusApproved}
+	if err := q.Validate(); err != nil {
+		return nil, fmt.Errorf("validate query: %w", err)
+	}
+
+	counts, err := s.repo.CountByPost(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("count comments: %w", err)
+	}
+
+	// Rebuild in request order: the adapter answers with a map, and a map has no
+	// order to preserve.
+	out := make([]PostCount, 0, len(cleaned))
+	for _, slug := range cleaned {
+		out = append(out, PostCount{Slug: slug, Count: counts[slug]})
+	}
+	return out, nil
+}
+
+// cleanSlugs trims, validates, deduplicates and caps a slug batch, preserving
+// the caller's order. Duplicates are dropped rather than rejected: a client
+// assembling the list from page content can easily name the same post twice,
+// and the answer would be the same either way.
+func cleanSlugs(slugs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(slugs))
+	cleaned := make([]string, 0, len(slugs))
+	for _, slug := range slugs {
+		slug = strings.TrimSpace(slug)
+		if slug == "" {
+			continue
+		}
+		if _, ok := seen[slug]; ok {
+			continue
+		}
+		if err := ValidatePostSlug(slug); err != nil {
+			return nil, err
+		}
+		seen[slug] = struct{}{}
+		cleaned = append(cleaned, slug)
+	}
+	if len(cleaned) == 0 {
+		return nil, &apperr.ValidationError{Field: "slugs", Message: "must name at least one post"}
+	}
+	if len(cleaned) > MaxCountSlugs {
+		return nil, &apperr.ValidationError{
+			Field:   "slugs",
+			Message: fmt.Sprintf("must not name more than %d posts", MaxCountSlugs),
+		}
+	}
+	return cleaned, nil
+}
+
+// SetStatus moves a comment to another moderation state.
+//
+// Approving is the only transition that makes a comment publicly readable, and
+// the service is where it is validated: the transport must not be able to store
+// a status the rest of the system does not know.
+func (s *Service) SetStatus(ctx context.Context, commentID string, status CommentStatus) (*Comment, error) {
+	commentID = strings.TrimSpace(commentID)
+	if commentID == "" {
+		return nil, &apperr.ValidationError{Field: "id", Message: "is required"}
+	}
+	if !status.Valid() {
+		return nil, &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
+	}
+
+	updated, err := s.repo.UpdateStatus(ctx, commentID, status, s.now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("update comment %q: %w", commentID, err)
+	}
+	s.logger.InfoContext(ctx, "comment status changed",
+		slog.String("comment_id", updated.ID),
+		slog.String("post_slug", updated.PostSlug),
+		slog.String("status", string(updated.Status)),
+	)
+	return updated, nil
+}
+
+// Delete removes a comment and every reply beneath it.
+//
+// The cascade lives in the repository so a SQL adapter can express it as one
+// statement instead of a service-side loop that reads every row. This is the
+// owner-of-the-site path: it assumes the caller was already authorized.
+func (s *Service) Delete(ctx context.Context, commentID string) error {
+	commentID = strings.TrimSpace(commentID)
+	if commentID == "" {
+		return &apperr.ValidationError{Field: "id", Message: "is required"}
+	}
+	if err := s.repo.Delete(ctx, commentID); err != nil {
+		return fmt.Errorf("delete comment %q: %w", commentID, err)
+	}
+	s.logger.InfoContext(ctx, "comment deleted", slog.String("comment_id", commentID))
+	return nil
+}
+
+// DeleteOwned removes a comment on behalf of its author, proving the claim with
+// the credential issued at creation time.
+//
+// The token is checked against the stored digest before the row is touched, so
+// a wrong guess cannot delete anything and cannot tell an existing comment from
+// a missing one by the number of round trips. A comment created without a
+// credential (seed data, imports) is never deletable this way.
+func (s *Service) DeleteOwned(ctx context.Context, commentID, token string) error {
+	commentID = strings.TrimSpace(commentID)
+	if commentID == "" {
+		return &apperr.ValidationError{Field: "id", Message: "is required"}
+	}
+
+	c, err := s.repo.Get(ctx, commentID)
+	if err != nil {
+		return fmt.Errorf("delete comment %q: %w", commentID, err)
+	}
+	if !deleteTokenMatches(c.DeleteTokenHash, token) {
+		return fmt.Errorf("delete comment %q: %w", commentID, apperr.ErrUnauthorized)
+	}
+
+	if err := s.repo.Delete(ctx, commentID); err != nil {
+		return fmt.Errorf("delete comment %q: %w", commentID, err)
+	}
+	s.logger.InfoContext(ctx, "comment deleted by author", slog.String("comment_id", commentID))
+	return nil
+}
+
 // PageSize returns the default page size applied to listings.
 func (s *Service) PageSize() int { return s.pageSize }
 
@@ -211,17 +392,27 @@ func (s *Service) clampLimit(limit int) int {
 // checkParent verifies that the parent comment exists and belongs to the same
 // post, which keeps threads from spanning unrelated articles.
 func (s *Service) checkParent(ctx context.Context, c *Comment) error {
-	parent, err := s.repo.Get(ctx, c.ParentID)
+	_, err := resolveParent(ctx, s.repo, c)
+	return err
+}
+
+// resolveParent returns the comment c replies to.
+//
+// It lives outside Service because LoadSeed fills the repository directly and
+// still has to apply the same rule: a fixture that can build a cross-post
+// thread, but that the API would reject, is a fixture that hides a bug.
+func resolveParent(ctx context.Context, repo Repository, c *Comment) (*Comment, error) {
+	parent, err := repo.Get(ctx, c.ParentID)
 	if err != nil {
-		return fmt.Errorf("resolve parent comment %q: %w", c.ParentID, err)
+		return nil, fmt.Errorf("resolve parent comment %q: %w", c.ParentID, err)
 	}
 	if parent.PostSlug != c.PostSlug {
-		return &apperr.ValidationError{
+		return nil, &apperr.ValidationError{
 			Field:   "parentId",
 			Message: "refers to a comment on a different post",
 		}
 	}
-	return nil
+	return parent, nil
 }
 
 // pendingReviewer is the default Moderator: every comment waits for a human to

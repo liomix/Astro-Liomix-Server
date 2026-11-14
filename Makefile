@@ -11,12 +11,23 @@ LDFLAGS    := -s -w \
 	-X main.commit=$(COMMIT) \
 	-X main.buildTime=$(BUILD_TIME)
 
-.PHONY: help run build test test-race cover vet lint fmt tidy clean
+.PHONY: help run dev build test test-race cover vet lint fmt tidy clean
 
 help: ## Show the available targets
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
+# 仅供本地演示：development 下种子文件本来就会默认加载，这里额外补上审核口令。
+# 覆盖方式：make dev ADMIN_TOKEN=...
+ADMIN_TOKEN ?= dev-admin-token-0123456789
+SEED_FILE   ?= configs/seed/demo-comments.json
+
 run: ## Run the API on HTTP_ADDR (default :8080)
+	$(GO) run ./cmd/server
+
+dev: ## Run with demo comments and a local admin token (development only)
+	APP_ENV=development \
+	ADMIN_TOKEN=$(ADMIN_TOKEN) \
+	COMMENT_SEED_FILE=$(SEED_FILE) \
 	$(GO) run ./cmd/server
 
 build: ## Compile the server into bin/

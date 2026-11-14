@@ -21,11 +21,35 @@ const (
 	EnvProduction  = "production"
 )
 
+// minAdminTokenLength is the shortest accepted ADMIN_TOKEN. Sixteen characters
+// is what a `openssl rand -hex 16`-style secret comfortably exceeds.
+const minAdminTokenLength = 16
+
+// demoSeedFile is what a development run loads when COMMENT_SEED_FILE is blank.
+// Storage is in-memory, so every restart starts empty; without a default a
+// newcomer opens the comment section, sees "no comments yet" and concludes the
+// feature was never wired up. COMMENT_SEED_FILE=off turns seeding off.
+const demoSeedFile = "configs/seed/demo-comments.json"
+
+// seedFileDisabled is the sentinel that opts out of the development default.
+// An empty value cannot carry that meaning: `COMMENT_SEED_FILE=` is how .env
+// files spell "not set", so treating it as opt-out would silently disable the
+// demo data for anyone who copies configs/.env.example.
+const seedFileDisabled = "off"
+
 // Config is the fully resolved configuration of the server.
 type Config struct {
 	Env     string
 	HTTP    HTTP
 	Comment Comment
+	Admin   Admin
+}
+
+// Admin holds the credentials of the single privileged operator.
+type Admin struct {
+	// Token guards the moderation routes. Empty means moderation is disabled,
+	// not that it is open to everyone.
+	Token string
 }
 
 // HTTP holds the transport-level settings.
@@ -48,6 +72,11 @@ type HTTP struct {
 type Comment struct {
 	DefaultPageSize int
 	MaxPageSize     int
+	// SeedFile is a demo fixture loaded at startup. When blank it defaults to
+	// demoSeedFile in development, so a bare `go run ./cmd/server` has something
+	// to show; "off" turns seeding off. Setting it in production is refused,
+	// because those comments bypass moderation and live in memory only.
+	SeedFile string
 }
 
 // Load reads the environment and returns a validated configuration. All
@@ -86,6 +115,12 @@ func Load() (*Config, error) {
 	loadStringList("HTTP_CORS_ORIGINS", &cfg.HTTP.CORSOrigins, &errs)
 	loadInt("COMMENT_DEFAULT_PAGE_SIZE", &cfg.Comment.DefaultPageSize, &errs)
 	loadInt("COMMENT_MAX_PAGE_SIZE", &cfg.Comment.MaxPageSize, &errs)
+	seed, _ := os.LookupEnv("COMMENT_SEED_FILE")
+	cfg.Comment.SeedFile = pickSeedFile(cfg.Env, seed, fileExists(demoSeedFile))
+
+	if token, ok := os.LookupEnv("ADMIN_TOKEN"); ok {
+		cfg.Admin.Token = strings.TrimSpace(token)
+	}
 
 	if err := errors.Join(errs...); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -105,6 +140,11 @@ func (c *Config) validate() error {
 	}
 	if strings.TrimSpace(c.HTTP.Addr) == "" {
 		errs = append(errs, errors.New("HTTP_ADDR must not be empty"))
+	}
+	// A short shared secret is guessable, so refuse it instead of running with
+	// a token that looks configured but is not much better than none.
+	if c.Admin.Token != "" && len(c.Admin.Token) < minAdminTokenLength {
+		errs = append(errs, fmt.Errorf("ADMIN_TOKEN must be at least %d characters", minAdminTokenLength))
 	}
 	for name, d := range map[string]time.Duration{
 		"HTTP_READ_HEADER_TIMEOUT": c.HTTP.ReadHeaderTimeout,
@@ -140,7 +180,39 @@ func (c *Config) validate() error {
 	if c.Comment.MaxPageSize < c.Comment.DefaultPageSize {
 		errs = append(errs, errors.New("COMMENT_MAX_PAGE_SIZE must be greater than or equal to COMMENT_DEFAULT_PAGE_SIZE"))
 	}
+	// Demo seeding writes unmoderated comments into a store that will not even
+	// survive a restart, so a production deployment that sets it by accident
+	// would get fake reader voices for as long as the process lives.
+	if c.Comment.SeedFile != "" && c.Env == EnvProduction {
+		errs = append(errs, errors.New("COMMENT_SEED_FILE must be empty in production"))
+	}
 	return errors.Join(errs...)
+}
+
+// pickSeedFile resolves which fixture a run loads. A named file always wins;
+// "off" and any non-development environment yield no seeding at all.
+//
+// The demo default is development-only: staging and production must not pick up
+// fake reader voices by accident, and validate() still rejects the file for
+// production even when it is named explicitly.
+func pickSeedFile(env, raw string, demoExists bool) string {
+	if named := strings.TrimSpace(raw); named != "" {
+		if strings.EqualFold(named, seedFileDisabled) {
+			return ""
+		}
+		return named
+	}
+	if env == EnvDevelopment && demoExists {
+		return demoSeedFile
+	}
+	return ""
+}
+
+// fileExists reports whether path is a regular file. A missing fixture is not
+// an error — it only means the demo default does not apply.
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular()
 }
 
 func envString(key, fallback string) string {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/liomix/astro-liomix-server/internal/comment"
 	"github.com/liomix/astro-liomix-server/internal/count"
@@ -47,6 +48,20 @@ func run() error {
 	// migration; nothing above or below depends on the implementation.
 	commentRepo := comment.NewMemoryRepository()
 
+	// Demo data for local runs. A fixture that fails to load is a broken
+	// configuration, so it stops the process instead of starting empty — an
+	// empty thread looks like the feature was never wired up at all.
+	if cfg.Comment.SeedFile != "" {
+		seeded, err := comment.LoadSeed(context.Background(), commentRepo, cfg.Comment.SeedFile, time.Now())
+		if err != nil {
+			return fmt.Errorf("seed comments: %w", err)
+		}
+		logger.Info("demo comments loaded",
+			slog.Int("comments", seeded),
+			slog.String("file", cfg.Comment.SeedFile),
+		)
+	}
+
 	commentService, err := comment.NewService(commentRepo,
 		comment.WithLogger(logger),
 		comment.WithPageSize(cfg.Comment.DefaultPageSize, cfg.Comment.MaxPageSize),
@@ -71,6 +86,7 @@ func run() error {
 		func(mux *http.ServeMux) {
 			comment.RegisterRoutes(mux, logger, commentService, comment.HTTPConfig{
 				MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
+				AdminToken:   cfg.Admin.Token,
 			})
 			count.RegisterRoutes(mux, logger, countService, count.HTTPConfig{})
 		},

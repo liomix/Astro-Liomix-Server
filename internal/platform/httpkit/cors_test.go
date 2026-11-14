@@ -3,6 +3,7 @@ package httpkit_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
@@ -170,6 +171,33 @@ func TestWithCORSPreflight(t *testing.T) {
 				t.Errorf("next handler ran %d times, want %d", next.calls, tt.wantNextCall)
 			}
 		})
+	}
+}
+
+func TestWithCORSAdvertisesAuthorDelete(t *testing.T) {
+	t.Parallel()
+
+	// A reader withdrawing their own comment sends DELETE with an
+	// Authorization header. Both have to be advertised, or the browser blocks
+	// the request at preflight and the server never sees it.
+	next := &nextRecorder{}
+	handler := httpkit.WithCORS(httpkit.CORSConfig{AllowedOrigins: []string{"*"}}, next.handler())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/comments/abc", nil)
+	req.Header.Set("Origin", "https://blog.example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodDelete)
+	req.Header.Set("Access-Control-Request-Headers", "authorization")
+	handler.ServeHTTP(rec, req)
+
+	if got := rec.Header().Get("Access-Control-Allow-Methods"); !strings.Contains(got, http.MethodDelete) {
+		t.Errorf("Access-Control-Allow-Methods = %q, want it to include DELETE", got)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(strings.ToLower(got), "authorization") {
+		t.Errorf("Access-Control-Allow-Headers = %q, want it to include Authorization", got)
+	}
+	if next.calls != 0 {
+		t.Errorf("next handler ran %d times, want 0 for a preflight", next.calls)
 	}
 }
 

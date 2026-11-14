@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Astro Liomix Blog API
-  version: 0.2.0
+  version: 0.5.0
   description: >
     Comment and traffic-counting API for the blog. New comments enter moderation
     and are not part of the public listing until approved. Storage adapters are
@@ -108,7 +108,36 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Comment"
+                $ref: "#/components/schemas/CreatedComment"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+
+  /api/v1/comments/counts:
+    get:
+      tags: [comments]
+      summary: Count comments per post
+      operationId: countComments
+      description: >
+        Answers how many approved comments each requested post has, so a page of
+        cards can show the number without loading every thread. Posts nobody has
+        commented on are answered with a count of zero instead of a 404: the
+        question is "how many", and the answer is zero.
+      parameters:
+        - name: slugs
+          in: query
+          required: true
+          description: >
+            Comma-separated post slugs. Blanks and duplicates are dropped, the
+            caller's order is preserved, and one batch is limited to 100 slugs.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: One entry per requested post, in request order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommentCountList"
         "422":
           $ref: "#/components/responses/InvalidInput"
 
@@ -117,6 +146,10 @@ paths:
       tags: [comments]
       summary: Get a comment
       operationId: getComment
+      description: >
+        A comment that is not approved is reported as 404 unless the request
+        carries the admin token: guessing an ID must not expose content that is
+        still awaiting moderation.
       parameters:
         - name: id
           in: path
@@ -132,6 +165,74 @@ paths:
                 $ref: "#/components/schemas/Comment"
         "404":
           $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [comments]
+      summary: Delete a comment and its replies
+      operationId: deleteComment
+      description: >
+        Removes the comment together with every reply beneath it, at any depth.
+        Replies go with the parent so a thread never keeps orphaned answers that
+        would read as if they were top-level remarks.
+
+
+        Two credentials are accepted. The admin token deletes anything. The
+        `deleteToken` returned by POST deletes only the comment it was issued
+        for — that is how a reader takes back something they wrote, without an
+        account. A comment created without a token (seeded or imported data) can
+        only be deleted with the admin token.
+      security:
+        - adminToken: []
+        - commentAuthorToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: Deleted, with every reply beneath it
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/comments/{id}/status:
+    patch:
+      tags: [comments]
+      summary: Change a comment's moderation state
+      operationId: updateCommentStatus
+      description: >
+        New comments arrive as `pending` and are invisible to readers until this
+        endpoint moves them to `approved`. `rejected` and `spam` stay hidden like
+        `pending`; the difference is only what the moderator meant by it.
+      security:
+        - adminToken: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateCommentStatusRequest"
+      responses:
+        "200":
+          description: The comment with its new status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
 
   /api/v1/count/site:
     get:
@@ -239,6 +340,21 @@ paths:
           $ref: "#/components/responses/Unavailable"
 
 components:
+  securitySchemes:
+    adminToken:
+      type: http
+      scheme: bearer
+      description: >
+        Shared secret from ADMIN_TOKEN. When the server has no token configured
+        the moderation route is not mounted at all and answers 404.
+    commentAuthorToken:
+      type: http
+      scheme: bearer
+      description: >
+        The `deleteToken` returned once by POST /api/v1/posts/{slug}/comments.
+        Scoped to that one comment: it cannot read, moderate or delete anything
+        else. Never returned by a read, so it is lost if the client does not
+        keep it.
   responses:
     InvalidInput:
       description: The request failed validation.
@@ -254,6 +370,17 @@ components:
             $ref: "#/components/schemas/Error"
     Unavailable:
       description: A dependency could not serve the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: The request did not carry a valid admin token.
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          description: Always a Bearer challenge.
       content:
         application/json:
           schema:
@@ -316,6 +443,16 @@ components:
           minLength: 1
           maxLength: 2000
 
+    UpdateCommentStatusRequest:
+      type: object
+      required: [status]
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum: [pending, approved, rejected, spam]
+          description: Only `approved` makes a comment readable by visitors.
+
     Comment:
       type: object
       required: [id, postSlug, author, body, status, createdAt, updatedAt]
@@ -340,6 +477,21 @@ components:
           type: string
           format: date-time
 
+    CreatedComment:
+      description: >
+        The stored comment plus the author's deletion credential. The token is
+        shown exactly once, here and nowhere else.
+      allOf:
+        - $ref: "#/components/schemas/Comment"
+        - type: object
+          required: [deleteToken]
+          properties:
+            deleteToken:
+              type: string
+              description: >
+                Bearer credential for DELETE /api/v1/comments/{id}. Store it on
+                the client; the server keeps only its digest.
+
     CommentList:
       type: object
       required: [items, pagination]
@@ -358,6 +510,23 @@ components:
               type: integer
             count:
               type: integer
+
+    CommentCountList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            required: [slug, count]
+            properties:
+              slug:
+                type: string
+              count:
+                type: integer
+                minimum: 0
+                description: Approved comments only.
 
     RecordVisitRequest:
       type: object

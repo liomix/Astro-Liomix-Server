@@ -22,6 +22,9 @@ var (
 	ErrConflict = errors.New("conflict")
 	// ErrUnavailable means a dependency could not serve the request.
 	ErrUnavailable = errors.New("unavailable")
+	// ErrUnauthorized means the request did not prove it may perform this
+	// action, either by omitting credentials or by presenting wrong ones.
+	ErrUnauthorized = errors.New("unauthorized")
 )
 
 // ValidationError reports which field failed validation and why. It unwraps to

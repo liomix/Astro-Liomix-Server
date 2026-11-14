@@ -1,0 +1,404 @@
+{
+	"comments": [
+		{
+			"id": "seed-161529-01",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "小满", "email": "xiaoman@example.com" },
+			"body": "沙发！这张的光比上次好太多了，是傍晚拍的吧？",
+			"minutesAgo": 2880
+		},
+		{
+			"id": "seed-161529-02",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "对，六点多，太阳刚落到楼后面那会儿。手机直出，没修。",
+			"minutesAgo": 2750
+		},
+		{
+			"id": "seed-161529-03",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "这个配色有点东西，暖灰配那盏灯真的好看。",
+			"minutesAgo": 2600
+		},
+		{
+			"id": "seed-161529-04",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-02",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "手机直出？什么机型，暗部居然没噪点。",
+			"minutesAgo": 2400
+		},
+		{
+			"id": "seed-161529-05",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-04",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "夜景模式开了长曝光，手机搁窗台上稳了两秒。手拿着肯定糊。",
+			"minutesAgo": 2200
+		},
+		{
+			"id": "seed-161529-06",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "三十七", "email": "thirtyseven@example.com" },
+			"body": "求一下这个窗台的位置，周末想去拍同款。",
+			"minutesAgo": 1900
+		},
+		{
+			"id": "seed-161529-07",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "顺便问一句，评论区现在是自建的了吗？看着像 Telegram。",
+			"minutesAgo": 1600
+		},
+		{
+			"id": "seed-161529-08",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-07",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "是，前端塞了个聊天界面，数据走自己的 Go 服务：`GET /api/v1/posts/{slug}/comments`。桌面端是抽屉，窄屏直接从右边滑进来。",
+			"minutesAgo": 1300
+		},
+		{
+			"id": "seed-161529-09",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "老徐", "email": "laoxu@example.com" },
+			"body": "顺手贴一下取评论那几行，文档里没写这么细：\n\n```ts\nconst slug = slugOfPath(\"/dynamic/2026-07-15-161529/\");\nconst comments = await fetchComments(slug);\nfor (const c of comments.slice().reverse()) render(c);\n```\n\n后端给的是新的一页在前，聊天要反过来读。",
+			"minutesAgo": 1100
+		},
+		{
+			"id": "seed-161529-10",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "楼上这个 `slugOfPath` 挺妙的，路径直接当 key 用，静态站点连 id 都不用维护。",
+			"minutesAgo": 900
+		},
+		{
+			"id": "seed-161529-11",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "提一个小问题：暗色模式下气泡跟壁纸的边界几乎看不见，连着三四条的时候分不清谁是谁。",
+			"minutesAgo": 780
+		},
+		{
+			"id": "seed-161529-12",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "三十七", "email": "thirtyseven@example.com" },
+			"body": "同意，白气泡在深色壁纸上像浮起来一块。",
+			"minutesAgo": 640
+		},
+		{
+			"id": "seed-161529-13",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-12",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "记下了，把气泡底色往上提一档试试。Telegram 那边也是靠一档很窄的明度差把消息分开的，纯描边反而脏。",
+			"minutesAgo": 520
+		},
+		{
+			"id": "seed-161529-14",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "话说回来，这张有原图吗，想当壁纸。",
+			"minutesAgo": 430
+		},
+		{
+			"id": "seed-161529-15",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "小满", "email": "xiaoman@example.com" },
+			"body": "壁纸 +1，缩略图看不够。",
+			"minutesAgo": 360
+		},
+		{
+			"id": "seed-161529-16",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-01",
+			"author": { "name": "老徐", "email": "laoxu@example.com" },
+			"body": "沙发让给你，我坐地板。",
+			"minutesAgo": 300
+		},
+		{
+			"id": "seed-161529-17",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "> 傍晚六点的光是最诚实的\n\n忘了是谁说的，但看这张图信了。",
+			"minutesAgo": 240
+		},
+		{
+			"id": "seed-161529-18",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "按重要程度排一下：\n\n1. 构图\n2. 光\n3. 那盏没关的灯\n\n三个都在线。",
+			"minutesAgo": 190
+		},
+		{
+			"id": "seed-161529-19",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-18",
+			"author": { "name": "三十七", "email": "thirtyseven@example.com" },
+			"body": "第三条才是灵魂，其余两条只是让它成立。",
+			"minutesAgo": 150
+		},
+		{
+			"id": "seed-161529-20",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "Kite", "email": "kite@example.com" },
+			"body": "第一次来。这个评论区的手感比之前挂的第三方好太多，滚动不卡，右键还能直接引用。",
+			"minutesAgo": 120
+		},
+		{
+			"id": "seed-161529-21",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "老徐", "email": "laoxu@example.com" },
+			"body": "想补课的直接搜「色温 白平衡 一篇就够」，比看我这堆碎话快。",
+			"minutesAgo": 95
+		},
+		{
+			"id": "seed-161529-22",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "seed-161529-21",
+			"author": { "name": "Kite", "email": "kite@example.com" },
+			"body": "收藏了，谢谢指路。",
+			"minutesAgo": 70
+		},
+		{
+			"id": "seed-161529-23",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "小满", "email": "xiaoman@example.com" },
+			"body": "已经右键存了三张（",
+			"minutesAgo": 40
+		},
+		{
+			"id": "seed-161529-24",
+			"postSlug": "dynamic-2026-07-15-161529",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "打卡，明天再来。",
+			"minutesAgo": 8
+		},
+		{
+			"id": "seed-010756-01",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "凌晨一点还在改样式，这条必须留个爪。",
+			"minutesAgo": 4200
+		},
+		{
+			"id": "seed-010756-02",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "老徐", "email": "laoxu@example.com" },
+			"body": "夜里写代码就是容易上头，一抬头天快亮了。",
+			"minutesAgo": 4000
+		},
+		{
+			"id": "seed-010756-03",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "这个圆角是 17px 吗？看着比浏览器默认的柔和一截。",
+			"minutesAgo": 3800
+		},
+		{
+			"id": "seed-010756-04",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "seed-010756-03",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "对，17。靠发送者那一侧的角收到 6，所以那边看着更「尖」一点。",
+			"minutesAgo": 3600
+		},
+		{
+			"id": "seed-010756-05",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "Kite", "email": "kite@example.com" },
+			"body": "代码块顶栏那个复制按钮是自己拼的吧？class 不像 marked 直接吐出来的。",
+			"minutesAgo": 3200
+		},
+		{
+			"id": "seed-010756-06",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "seed-010756-05",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "是。先过白名单消毒，再往 `<pre>` 外面套一层，这样白名单里不用为 `button` 开口子。",
+			"minutesAgo": 2900
+		},
+		{
+			"id": "seed-010756-07",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "三十七", "email": "thirtyseven@example.com" },
+			"body": "这种细节只有自己从头写一遍才知道坑在哪。抄库抄不来。",
+			"minutesAgo": 2400
+		},
+		{
+			"id": "seed-010756-08",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "小满", "email": "xiaoman@example.com" },
+			"body": "三点的评论区居然还有人，我还以为只有我在刷。",
+			"minutesAgo": 2000
+		},
+		{
+			"id": "seed-010756-09",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "seed-010756-08",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "摸鱼的人永远在。",
+			"minutesAgo": 1500
+		},
+		{
+			"id": "seed-010756-10",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "建议加个「只看楼主」，这种长楼翻起来累。",
+			"minutesAgo": 900
+		},
+		{
+			"id": "seed-010756-11",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "楼上 +1。",
+			"minutesAgo": 400
+		},
+		{
+			"id": "seed-010756-12",
+			"postSlug": "dynamic-2026-07-15-010756",
+			"parentId": "",
+			"author": { "name": "老徐", "email": "laoxu@example.com" },
+			"body": "睡了睡了，明天还要上班。",
+			"minutesAgo": 60
+		},
+		{
+			"id": "seed-020613-01",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "Kite", "email": "kite@example.com" },
+			"body": "配色方案能分享一下吗？想搬到自己站上。",
+			"minutesAgo": 3800
+		},
+		{
+			"id": "seed-020613-02",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "三档灰加一个暖黄，比例大概 7 : 2 : 1，黄只用在需要被看见的地方。",
+			"minutesAgo": 3600
+		},
+		{
+			"id": "seed-020613-03",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "seed-020613-01",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "等我整理一下写成一篇，变量名和明暗两套都贴出来。",
+			"minutesAgo": 3300
+		},
+		{
+			"id": "seed-020613-04",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "等博客 +1。",
+			"minutesAgo": 2800
+		},
+		{
+			"id": "seed-020613-05",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "三十七", "email": "thirtyseven@example.com" },
+			"body": "这张的构图有点像新海诚的分镜，尤其是云那一段。",
+			"minutesAgo": 2000
+		},
+		{
+			"id": "seed-020613-06",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "终于有人说了，我也这么觉得，就差一句台词。",
+			"minutesAgo": 1200
+		},
+		{
+			"id": "seed-020613-07",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "小满", "email": "xiaoman@example.com" },
+			"body": "什么时候更新下一篇？",
+			"minutesAgo": 600
+		},
+		{
+			"id": "seed-020613-08",
+			"postSlug": "dynamic-2026-07-15-020613",
+			"parentId": "",
+			"author": { "name": "老徐", "email": "laoxu@example.com" },
+			"body": "催更（bushi",
+			"minutesAgo": 180
+		},
+		{
+			"id": "seed-021127-01",
+			"postSlug": "dynamic-2026-07-15-021127",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "第一次用手机看这个页面，键盘弹起来的时候输入框被挡住了一半。",
+			"minutesAgo": 3000
+		},
+		{
+			"id": "seed-021127-02",
+			"postSlug": "dynamic-2026-07-15-021127",
+			"parentId": "",
+			"author": { "name": "Kite", "email": "kite@example.com" },
+			"body": "iOS Safari 吗？我这边也是，安卓倒正常。",
+			"minutesAgo": 2700
+		},
+		{
+			"id": "seed-021127-03",
+			"postSlug": "dynamic-2026-07-15-021127",
+			"parentId": "",
+			"author": { "name": "阿澈", "email": "ache@example.com" },
+			"body": "十有八九是 `100vh` 的老问题，换成 `100dvh` 让浏览器按可视区算就好了。",
+			"minutesAgo": 2200
+		},
+		{
+			"id": "seed-021127-04",
+			"postSlug": "dynamic-2026-07-15-021127",
+			"parentId": "seed-021127-03",
+			"author": { "name": "Liomix", "email": "liomix@example.com" },
+			"body": "改了，等下次部署。顺便把滚动到底那一下也改成按 `dvh` 算了。",
+			"minutesAgo": 1500
+		},
+		{
+			"id": "seed-021127-05",
+			"postSlug": "dynamic-2026-07-15-021127",
+			"parentId": "",
+			"author": { "name": "月见", "email": "yuejian@example.com" },
+			"body": "试了，好了，键盘顶上来输入框跟着走。",
+			"minutesAgo": 700
+		},
+		{
+			"id": "seed-021127-06",
+			"postSlug": "dynamic-2026-07-15-021127",
+			"parentId": "",
+			"author": { "name": "南岸", "email": "nanan@example.com" },
+			"body": "路过，留个脚印。",
+			"minutesAgo": 25
+		}
+	]
+}

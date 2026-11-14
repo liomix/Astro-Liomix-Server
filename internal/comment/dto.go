@@ -35,6 +35,43 @@ type commentPayload struct {
 	UpdatedAt time.Time    `json:"updatedAt"`
 }
 
+// createdCommentPayload is what POST returns. It is the ordinary comment plus
+// the author's deletion credential, which is shown exactly once and never
+// comes back on a read: losing it means asking the site owner to delete the
+// comment instead.
+type createdCommentPayload struct {
+	commentPayload
+	DeleteToken string `json:"deleteToken"`
+}
+
+// updateCommentStatusRequest is the body accepted by PATCH /comments/{id}/status.
+type updateCommentStatusRequest struct {
+	Status string `json:"status"`
+}
+
+// commentCountPayload is the wire representation of one post's comment count.
+type commentCountPayload struct {
+	Slug  string `json:"slug"`
+	Count int    `json:"count"`
+}
+
+// commentCountsResponse is the envelope for a batch count.
+//
+// It mirrors the batch read of the count module (`items`) so a client that
+// already knows how to read one batch endpoint can read the other.
+type commentCountsResponse struct {
+	Items []commentCountPayload `json:"items"`
+}
+
+// toCommentCountPayloads maps counts to their wire form, preserving order.
+func toCommentCountPayloads(counts []PostCount) []commentCountPayload {
+	items := make([]commentCountPayload, 0, len(counts))
+	for _, c := range counts {
+		items = append(items, commentCountPayload{Slug: c.Slug, Count: c.Count})
+	}
+	return items
+}
+
 // pagination describes the page a listing returned.
 type pagination struct {
 	Limit  int `json:"limit"`

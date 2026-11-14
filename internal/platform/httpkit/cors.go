@@ -26,8 +26,12 @@ const (
 	// stale policy in browser caches for a long time.
 	defaultPreflightMaxAge = 10 * time.Minute
 
-	corsAllowMethods = "GET, POST, OPTIONS"
-	corsAllowHeaders = "Content-Type"
+	// DELETE is listed because a comment's author can take their own comment
+	// back with the credential issued at creation. Authorization is listed for
+	// the same reason: without it the browser blocks that request at preflight,
+	// where the server never gets a chance to answer.
+	corsAllowMethods = "GET, POST, DELETE, OPTIONS"
+	corsAllowHeaders = "Content-Type, Authorization"
 )
 
 // WithCORS answers cross-origin requests for the allowed origins and short

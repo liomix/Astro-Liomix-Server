@@ -88,6 +88,8 @@ func classifyError(err error) (status int, code, message, field string) {
 		return http.StatusConflict, "conflict", "resource already exists", ""
 	case errors.Is(err, apperr.ErrUnavailable):
 		return http.StatusServiceUnavailable, "unavailable", "dependency unavailable", ""
+	case errors.Is(err, apperr.ErrUnauthorized):
+		return http.StatusUnauthorized, "unauthorized", "authentication required", ""
 	case errors.Is(err, context.Canceled):
 		return statusClientClosedRequest, "client_closed_request", "client closed request", ""
 	case errors.Is(err, context.DeadlineExceeded):

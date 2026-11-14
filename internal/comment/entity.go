@@ -31,6 +31,10 @@ const (
 	MaxURLLength = 200
 	// MaxBodyLength bounds the comment body in runes.
 	MaxBodyLength = 2000
+	// MaxCountSlugs caps one batch count. It matches the listing cap: a client
+	// asking for more posts at once than it could ever page through is not
+	// asking a question the API needs to answer.
+	MaxCountSlugs = 100
 )
 
 // CommentStatus is the moderation state of a comment.
@@ -97,6 +101,14 @@ type Comment struct {
 	Status    CommentStatus
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// DeleteTokenHash is the digest of the credential handed to the author when
+	// the comment was created, and the only thing stored: the plaintext is
+	// returned once and kept by the client, never written down here. An empty
+	// value means nobody can delete this comment on its author's behalf —
+	// seed data and comments imported from elsewhere are in that position, and
+	// only the site owner (admin token) can remove them.
+	DeleteTokenHash string
 }
 
 // Clone returns a copy of c. Comment holds only value fields, so a shallow copy
@@ -152,6 +164,44 @@ func (q Query) Validate() error {
 	}
 	if q.Offset < 0 {
 		return &apperr.ValidationError{Field: "offset", Message: "must not be negative"}
+	}
+	return nil
+}
+
+// PostCount is how many comments one post has. It is a read model, not an
+// entity: nothing is stored in this shape.
+type PostCount struct {
+	Slug  string
+	Count int
+}
+
+// CountQuery selects the comments a batch count covers.
+//
+// It carries no pagination on purpose: a count is one number per post, and
+// limit/offset would only make two callers disagree about what they mean.
+type CountQuery struct {
+	// PostSlugs are the posts to count, already cleaned by the service.
+	PostSlugs []string
+	// Status narrows the count to one moderation state. Empty counts every
+	// state, which is only useful for an admin view.
+	Status CommentStatus
+}
+
+// Validate reports whether the query can be executed as written.
+func (q CountQuery) Validate() error {
+	if len(q.PostSlugs) == 0 {
+		return &apperr.ValidationError{Field: "slugs", Message: "must name at least one post"}
+	}
+	if len(q.PostSlugs) > MaxCountSlugs {
+		return &apperr.ValidationError{Field: "slugs", Message: fmt.Sprintf("must not name more than %d posts", MaxCountSlugs)}
+	}
+	for _, slug := range q.PostSlugs {
+		if err := ValidatePostSlug(slug); err != nil {
+			return err
+		}
+	}
+	if q.Status != "" && !q.Status.Valid() {
+		return &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
 	}
 	return nil
 }
