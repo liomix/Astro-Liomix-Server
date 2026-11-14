@@ -9,10 +9,12 @@ import (
 )
 
 // RouterConfig carries transport-level tuning. The zero value is usable: it
-// applies no request deadline.
+// applies no request deadline and no CORS handling.
 type RouterConfig struct {
 	// RequestTimeout bounds handler work; zero disables the deadline.
 	RequestTimeout time.Duration
+	// CORS allows the static blog, served from another origin, to call the API.
+	CORS CORSConfig
 }
 
 // NewRouter builds the HTTP handler for the service.
@@ -21,8 +23,10 @@ type RouterConfig struct {
 // exposes them; everything else is contributed by register, which receives the
 // mux so a module can mount its own routes without knowing about middleware.
 //
-// Middleware order, outermost first: request ID, panic recovery, access
-// logging, request timeout.
+// Middleware order, outermost first: CORS, request ID, panic recovery, access
+// logging, request timeout. CORS sits outermost so a preflight is answered
+// before any handler work, and so its headers are present on every response the
+// browser may inspect.
 func NewRouter(logger *slog.Logger, cfg RouterConfig, register func(*http.ServeMux)) http.Handler {
 	if logger == nil {
 		logger = slog.Default()
@@ -47,6 +51,7 @@ func NewRouter(logger *slog.Logger, cfg RouterConfig, register func(*http.ServeM
 	root = WithLogging(logger, root)
 	root = WithRecovery(logger, root)
 	root = WithRequestID(root)
+	root = WithCORS(cfg.CORS, root)
 	return root
 }
 

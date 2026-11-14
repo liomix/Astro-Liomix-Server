@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/liomix/astro-liomix-server/internal/comment"
+	"github.com/liomix/astro-liomix-server/internal/count"
 	"github.com/liomix/astro-liomix-server/internal/platform/config"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
 )
@@ -54,15 +55,24 @@ func run() error {
 		return fmt.Errorf("build comment service: %w", err)
 	}
 
+	countService, err := count.NewService(count.NewMemoryRepository())
+	if err != nil {
+		return fmt.Errorf("build count service: %w", err)
+	}
+
 	// The router owns health probes, the 404 fallback and the middleware stack;
 	// each module mounts its own routes through the callback, so it never needs
 	// to know about middleware.
 	router := httpkit.NewRouter(logger,
-		httpkit.RouterConfig{RequestTimeout: cfg.HTTP.RequestTimeout},
+		httpkit.RouterConfig{
+			RequestTimeout: cfg.HTTP.RequestTimeout,
+			CORS:           httpkit.CORSConfig{AllowedOrigins: cfg.HTTP.CORSOrigins},
+		},
 		func(mux *http.ServeMux) {
 			comment.RegisterRoutes(mux, logger, commentService, comment.HTTPConfig{
 				MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 			})
+			count.RegisterRoutes(mux, logger, countService, count.HTTPConfig{})
 		},
 	)
 

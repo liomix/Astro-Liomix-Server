@@ -1,17 +1,19 @@
 openapi: 3.1.0
 info:
   title: Astro Liomix Blog API
-  version: 0.1.0
+  version: 0.2.0
   description: >
-    Comment API for the blog. New comments enter moderation and are not part of
-    the public listing until approved. The storage adapter is in-memory for now;
-    the HTTP contract is stable.
+    Comment and traffic-counting API for the blog. New comments enter moderation
+    and are not part of the public listing until approved. Storage adapters are
+    in-memory for now; the HTTP contract is stable.
 servers:
   - url: http://localhost:8080
     description: Local development
 
 tags:
   - name: comments
+  - name: count
+    description: Site-wide traffic counters.
   - name: health
 
 paths:
@@ -131,6 +133,111 @@ paths:
         "404":
           $ref: "#/components/responses/NotFound"
 
+  /api/v1/count/site:
+    get:
+      tags: [count]
+      summary: Read the site counters
+      operationId: getSiteStats
+      description: >
+        Cumulative site-wide traffic since the counter started, not a daily
+        figure. `visitors` counts distinct visitor IDs, so it grows slower than
+        `views` and does not move for clients that report without an ID.
+      responses:
+        "200":
+          description: The current counters
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteStats"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/count/site/visits:
+    post:
+      tags: [count]
+      summary: Record a site visit
+      operationId: recordSiteVisit
+      description: >
+        Counts one page view and answers with the updated counters, so a single
+        round-trip both records and reports. The response is 200 rather than 201
+        because a visit is an increment on a counter, not an addressable
+        resource: there is no Location to return and nothing to fetch later.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordVisitRequest"
+      responses:
+        "200":
+          description: Visit counted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SiteStats"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/count/posts:
+    get:
+      tags: [count]
+      summary: Read post view counts in bulk
+      operationId: listPostViews
+      description: >
+        A listing page asks once for every card it renders instead of one request
+        per card. Counts are cumulative page views of the article, not unique
+        readers. A slug that was never read reports zero rather than being
+        omitted, so the caller can render a placeholder without special cases.
+      parameters:
+        - name: slugs
+          in: query
+          required: true
+          description: Comma-separated post slugs, at most 100.
+          schema:
+            type: string
+          example: hello-astro,notes/2026/hello
+      responses:
+        "200":
+          description: One entry per requested slug, in request order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostViewsList"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/count/posts/views:
+    post:
+      tags: [count]
+      summary: Record a post read
+      operationId: recordPostView
+      description: >
+        Adds one read to the post and returns its new total. The slug travels in
+        the body because a nested slug ("notes/2026/hello") contains "/" and a
+        path wildcard cannot span segments. Returns 200 for the same reason as
+        the site visit endpoint: an increment is not an addressable resource.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordPostViewRequest"
+      responses:
+        "200":
+          description: Read counted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostViews"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
 components:
   responses:
     InvalidInput:
@@ -141,6 +248,12 @@ components:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: No resource matches the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unavailable:
+      description: A dependency could not serve the request.
       content:
         application/json:
           schema:
@@ -245,3 +358,66 @@ components:
               type: integer
             count:
               type: integer
+
+    RecordVisitRequest:
+      type: object
+      additionalProperties: false
+      description: >
+        The body may be an empty object when the client has no visitor
+        identifier; the view is still counted.
+      properties:
+        visitorId:
+          type: string
+          maxLength: 128
+          description: >
+            Opaque per-browser identifier minted by the client and reused across
+            page loads. The server never parses it, never returns it, and uses it
+            only to deduplicate the visitor total.
+
+    SiteStats:
+      type: object
+      required: [views, visitors]
+      properties:
+        views:
+          type: integer
+          format: int64
+          description: Total recorded page views.
+        visitors:
+          type: integer
+          format: int64
+          description: Distinct visitor IDs seen.
+        updatedAt:
+          type: string
+          format: date-time
+          description: Time of the last recorded visit. Absent while the counter is empty.
+
+    RecordPostViewRequest:
+      type: object
+      required: [slug]
+      additionalProperties: false
+      properties:
+        slug:
+          type: string
+          maxLength: 200
+          pattern: "^[A-Za-z0-9._/-]+$"
+          description: Post identifier, the same one the comment API uses.
+
+    PostViews:
+      type: object
+      required: [slug, views]
+      properties:
+        slug:
+          type: string
+        views:
+          type: integer
+          format: int64
+          description: Cumulative reads of the post.
+
+    PostViewsList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PostViews"

@@ -22,6 +22,7 @@ func clearEnv(t *testing.T) {
 		"HTTP_SHUTDOWN_TIMEOUT",
 		"HTTP_REQUEST_TIMEOUT",
 		"HTTP_MAX_BODY_BYTES",
+		"HTTP_CORS_ORIGINS",
 		"COMMENT_DEFAULT_PAGE_SIZE",
 		"COMMENT_MAX_PAGE_SIZE",
 	} {
@@ -52,6 +53,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.HTTP.MaxBodyBytes != 32<<10 {
 		t.Errorf("MaxBodyBytes = %d, want %d", cfg.HTTP.MaxBodyBytes, 32<<10)
 	}
+	if len(cfg.HTTP.CORSOrigins) != 1 || cfg.HTTP.CORSOrigins[0] != "*" {
+		t.Errorf("CORSOrigins = %v, want [*]", cfg.HTTP.CORSOrigins)
+	}
 	if cfg.Comment.DefaultPageSize != 20 || cfg.Comment.MaxPageSize != 100 {
 		t.Errorf("page sizes = (%d, %d), want (20, 100)", cfg.Comment.DefaultPageSize, cfg.Comment.MaxPageSize)
 	}
@@ -65,6 +69,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("HTTP_MAX_BODY_BYTES", "4096")
 	t.Setenv("COMMENT_DEFAULT_PAGE_SIZE", "10")
 	t.Setenv("COMMENT_MAX_PAGE_SIZE", "50")
+	t.Setenv("HTTP_CORS_ORIGINS", "https://blog.example.com, http://localhost:2077 ")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -83,6 +88,15 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.Comment.MaxPageSize != 50 {
 		t.Errorf("MaxPageSize = %d, want 50", cfg.Comment.MaxPageSize)
 	}
+	wantOrigins := []string{"https://blog.example.com", "http://localhost:2077"}
+	if len(cfg.HTTP.CORSOrigins) != len(wantOrigins) {
+		t.Fatalf("CORSOrigins = %v, want %v", cfg.HTTP.CORSOrigins, wantOrigins)
+	}
+	for i, want := range wantOrigins {
+		if cfg.HTTP.CORSOrigins[i] != want {
+			t.Errorf("CORSOrigins[%d] = %q, want %q (entries must be trimmed)", i, cfg.HTTP.CORSOrigins[i], want)
+		}
+	}
 }
 
 func TestLoadRejectsInvalidValues(t *testing.T) {
@@ -100,6 +114,9 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "zero body cap", key: "HTTP_MAX_BODY_BYTES", value: "0", wantSub: "HTTP_MAX_BODY_BYTES"},
 		{name: "max page below default", key: "COMMENT_MAX_PAGE_SIZE", value: "5", wantSub: "COMMENT_MAX_PAGE_SIZE"},
 		{name: "non-numeric page size", key: "COMMENT_DEFAULT_PAGE_SIZE", value: "many", wantSub: "COMMENT_DEFAULT_PAGE_SIZE"},
+		{name: "origin without scheme", key: "HTTP_CORS_ORIGINS", value: "blog.example.com", wantSub: "HTTP_CORS_ORIGINS"},
+		{name: "origin with trailing slash", key: "HTTP_CORS_ORIGINS", value: "https://blog.example.com/", wantSub: "HTTP_CORS_ORIGINS"},
+		{name: "list of blanks", key: "HTTP_CORS_ORIGINS", value: " , ,", wantSub: "HTTP_CORS_ORIGINS"},
 	}
 
 	for _, tt := range tests {

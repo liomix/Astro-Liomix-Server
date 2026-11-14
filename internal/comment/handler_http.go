@@ -1,8 +1,6 @@
 package comment
 
 import (
-	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -55,7 +53,7 @@ type commentHandler struct {
 // that status rather than implying publication.
 func (h *commentHandler) create(w http.ResponseWriter, r *http.Request) {
 	var req createCommentRequest
-	if err := h.decodeJSON(w, r, &req); err != nil {
+	if err := httpkit.DecodeJSON(w, r, h.maxBodySize, &req); err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
@@ -139,27 +137,6 @@ func (h *commentHandler) list(w http.ResponseWriter, r *http.Request) {
 			Count:  len(items),
 		},
 	})
-}
-
-// decodeJSON decodes the request body with a size cap, unknown-field rejection
-// and a trailing-data check, so malformed clients fail loudly instead of
-// silently dropping fields.
-func (h *commentHandler) decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, h.maxBodySize)
-
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(dst); err != nil {
-		var maxBytesErr *http.MaxBytesError
-		if errors.As(err, &maxBytesErr) {
-			return &apperr.ValidationError{Field: "body", Message: "request body is too large"}
-		}
-		return &apperr.ValidationError{Field: "body", Message: "must be valid JSON matching the documented schema"}
-	}
-	if decoder.More() {
-		return &apperr.ValidationError{Field: "body", Message: "must contain a single JSON object"}
-	}
-	return nil
 }
 
 // parseStatusFilter applies the public default: only approved comments are

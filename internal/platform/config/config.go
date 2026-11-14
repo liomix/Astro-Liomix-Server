@@ -38,6 +38,10 @@ type HTTP struct {
 	ShutdownTimeout   time.Duration
 	RequestTimeout    time.Duration
 	MaxBodyBytes      int64
+	// CORSOrigins lists the browser origins allowed to call the API. The
+	// static blog lives on another origin, so this is what makes its fetch
+	// calls legal. "*" means any origin; an empty list disables CORS.
+	CORSOrigins []string
 }
 
 // Comment holds the comment-service settings.
@@ -61,6 +65,7 @@ func Load() (*Config, error) {
 			ShutdownTimeout:   15 * time.Second,
 			RequestTimeout:    10 * time.Second,
 			MaxBodyBytes:      32 << 10,
+			CORSOrigins:       []string{"*"},
 		},
 		Comment: Comment{
 			DefaultPageSize: 20,
@@ -78,6 +83,7 @@ func Load() (*Config, error) {
 	loadDuration("HTTP_SHUTDOWN_TIMEOUT", &cfg.HTTP.ShutdownTimeout, &errs)
 	loadDuration("HTTP_REQUEST_TIMEOUT", &cfg.HTTP.RequestTimeout, &errs)
 	loadInt64("HTTP_MAX_BODY_BYTES", &cfg.HTTP.MaxBodyBytes, &errs)
+	loadStringList("HTTP_CORS_ORIGINS", &cfg.HTTP.CORSOrigins, &errs)
 	loadInt("COMMENT_DEFAULT_PAGE_SIZE", &cfg.Comment.DefaultPageSize, &errs)
 	loadInt("COMMENT_MAX_PAGE_SIZE", &cfg.Comment.MaxPageSize, &errs)
 
@@ -116,6 +122,17 @@ func (c *Config) validate() error {
 	}
 	if c.HTTP.MaxBodyBytes <= 0 {
 		errs = append(errs, errors.New("HTTP_MAX_BODY_BYTES must be positive"))
+	}
+	for _, origin := range c.HTTP.CORSOrigins {
+		switch {
+		case origin == "*":
+		case !strings.HasPrefix(origin, "http://") && !strings.HasPrefix(origin, "https://"):
+			errs = append(errs, fmt.Errorf("HTTP_CORS_ORIGINS entry %q must be \"*\" or an origin starting with http:// or https://", origin))
+		case strings.HasSuffix(origin, "/"):
+			// A browser sends Origin without a trailing slash, so a value with
+			// one can never match and would fail silently.
+			errs = append(errs, fmt.Errorf("HTTP_CORS_ORIGINS entry %q must not end with a slash", origin))
+		}
 	}
 	if c.Comment.DefaultPageSize <= 0 {
 		errs = append(errs, errors.New("COMMENT_DEFAULT_PAGE_SIZE must be positive"))
@@ -157,6 +174,26 @@ func loadInt64(key string, dst *int64, errs *[]error) {
 		return
 	}
 	*dst = value
+}
+
+// loadStringList reads a comma-separated list, trimming entries and dropping
+// empty ones so a trailing comma stays harmless.
+func loadStringList(key string, dst *[]string, errs *[]error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return
+	}
+	values := make([]string, 0, 4)
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			values = append(values, part)
+		}
+	}
+	if len(values) == 0 {
+		*errs = append(*errs, fmt.Errorf("%s: %q contains no origins", key, raw))
+		return
+	}
+	*dst = values
 }
 
 func loadDuration(key string, dst *time.Duration, errs *[]error) {
