@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/liomix/astro-liomix-server/internal/comment"
 	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
@@ -157,17 +158,19 @@ func TestNormalizeBody(t *testing.T) {
 func TestQueryValidate(t *testing.T) {
 	t.Parallel()
 
+	cursor := comment.Cursor{CreatedAt: time.Now().UTC(), ID: "c-1"}
+
 	tests := []struct {
 		name      string
 		query     comment.Query
 		wantField string
 	}{
 		{name: "zero value", query: comment.Query{}},
-		{name: "full query", query: comment.Query{PostSlug: "hello", Status: comment.StatusApproved, Limit: 10, Offset: 20}},
+		{name: "full query", query: comment.Query{PostSlug: "hello", Status: comment.StatusApproved, Limit: 10, Cursor: &cursor}},
 		{name: "bad slug", query: comment.Query{PostSlug: "hello world"}, wantField: "postSlug"},
 		{name: "bad status", query: comment.Query{PostSlug: "hello", Status: "archived"}, wantField: "status"},
 		{name: "negative limit", query: comment.Query{PostSlug: "hello", Limit: -1}, wantField: "limit"},
-		{name: "negative offset", query: comment.Query{PostSlug: "hello", Offset: -5}, wantField: "offset"},
+		{name: "cursor without an id", query: comment.Query{PostSlug: "hello", Cursor: &comment.Cursor{CreatedAt: time.Now()}}, wantField: "cursor"},
 	}
 
 	for _, tt := range tests {

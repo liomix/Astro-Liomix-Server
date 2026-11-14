@@ -27,11 +27,22 @@ const (
 	defaultPreflightMaxAge = 10 * time.Minute
 
 	// DELETE is listed because a comment's author can take their own comment
-	// back with the credential issued at creation. Authorization is listed for
-	// the same reason: without it the browser blocks that request at preflight,
+	// back with the credential issued at creation, and PATCH because moderation
+	// is a partial update. Authorization and Idempotency-Key are listed for the
+	// same reason: without them the browser blocks the request at preflight,
 	// where the server never gets a chance to answer.
-	corsAllowMethods = "GET, POST, DELETE, OPTIONS"
-	corsAllowHeaders = "Content-Type, Authorization"
+	//
+	// Every header here is one the service actually reads. Listing a header
+	// "just in case" hides the real dependency on a policy nobody reviews.
+	corsAllowMethods = "GET, POST, PATCH, DELETE, OPTIONS"
+	corsAllowHeaders = "Content-Type, Authorization, Idempotency-Key, If-None-Match"
+
+	// corsExposeHeaders names the response headers JavaScript is allowed to
+	// read. Custom headers are invisible to fetch() unless listed here, and the
+	// failure mode is silent: headers.get() returns null with no warning, which
+	// is how "the request id is always empty" turns into an argument between
+	// two teams.
+	corsExposeHeaders = "Location, ETag, X-Request-Id, Retry-After, Idempotency-Replayed"
 )
 
 // WithCORS answers cross-origin requests for the allowed origins and short
@@ -72,6 +83,7 @@ func WithCORS(cfg CORSConfig, next http.Handler) http.Handler {
 			header.Set("Access-Control-Allow-Origin", allowed)
 			header.Set("Access-Control-Allow-Methods", corsAllowMethods)
 			header.Set("Access-Control-Allow-Headers", corsAllowHeaders)
+			header.Set("Access-Control-Expose-Headers", corsExposeHeaders)
 			header.Set("Access-Control-Max-Age", strconv.Itoa(int(maxAge.Seconds())))
 		}
 

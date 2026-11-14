@@ -18,16 +18,26 @@ type commentAuthorPayload struct {
 
 // publicAuthor is the author shape returned on output. Email is intentionally
 // absent: it is collected for moderation and notifications, never published.
+//
+// Website has no omitempty: "" means "this author gave no site", which is a
+// value, and a missing key would make the client guess whether the field exists
+// at all.
 type publicAuthor struct {
 	Name    string `json:"name"`
-	Website string `json:"website,omitempty"`
+	Website string `json:"website"`
 }
 
 // commentPayload is the wire representation of a comment.
+//
+// ParentID is a pointer so a top-level comment serialises as `"parentId": null`
+// rather than dropping the key. A client can then tell "this is a root comment"
+// from "this response did not include the field" without heuristics, which is
+// what keeps the reply-tree rendering from silently flattening on a schema
+// change.
 type commentPayload struct {
 	ID        string       `json:"id"`
 	PostSlug  string       `json:"postSlug"`
-	ParentID  string       `json:"parentId,omitempty"`
+	ParentID  *string      `json:"parentId"`
 	Author    publicAuthor `json:"author"`
 	Body      string       `json:"body"`
 	Status    string       `json:"status"`
@@ -72,25 +82,30 @@ func toCommentCountPayloads(counts []PostCount) []commentCountPayload {
 	return items
 }
 
-// pagination describes the page a listing returned.
-type pagination struct {
-	Limit  int `json:"limit"`
-	Offset int `json:"offset"`
-	Count  int `json:"count"`
-}
-
-// listCommentsResponse is the envelope for comment listings.
+// listCommentsResponse is one page of a thread.
+//
+// NextCursor is null on the last page. It is a pointer rather than an omitted
+// field so "no more comments" is a state the client can read directly instead
+// of inferring it from a short page — an inference that breaks the moment
+// moderation removes a row between two page requests.
 type listCommentsResponse struct {
 	Items      []commentPayload `json:"items"`
-	Pagination pagination       `json:"pagination"`
+	NextCursor *string          `json:"nextCursor"`
 }
 
 // toCommentPayload maps the entity to its wire form, dropping private fields.
 func toCommentPayload(c *Comment) commentPayload {
+	var parent *string
+	if c.ParentID != "" {
+		// A copy per row: taking the address of the entity's field would alias
+		// the caller's value.
+		parentID := c.ParentID
+		parent = &parentID
+	}
 	return commentPayload{
 		ID:       c.ID,
 		PostSlug: c.PostSlug,
-		ParentID: c.ParentID,
+		ParentID: parent,
 		Author: publicAuthor{
 			Name:    c.Author.Name,
 			Website: c.Author.Website,

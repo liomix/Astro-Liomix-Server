@@ -1,100 +1,141 @@
-// Package httpkit holds the HTTP plumbing every module shares: the router and
-// its middleware stack, the JSON envelope, and the error-to-status mapping.
-//
-// It depends on nothing but the standard library and platform/apperr, so any
-// module can use it without importing another module.
 package httpkit
 
 import (
-	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
-
-	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
+	"strings"
 )
 
-// errorBody is the JSON envelope returned for every failed request. Clients
-// branch on Code; Message is for humans and never contains internal details.
-type errorBody struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Field     string `json:"field,omitempty"`
-	RequestID string `json:"requestId,omitempty"`
+// Content types the transport writes. Every response is JSON; the only
+// variation is the error document, which has its own media type so a client (or
+// a proxy dashboard) can tell the two apart without parsing.
+const (
+	ContentTypeJSON    = "application/json; charset=utf-8"
+	ContentTypeProblem = "application/problem+json; charset=utf-8"
+)
+
+// Cache-Control values used by the handlers.
+//
+// They are constants rather than string literals at the call sites because
+// "every GET states its caching policy" is a rule that only holds if the
+// policies are few enough to review. Writes and probes are no-store; public
+// reads are stored but always revalidated, with an ETag making the revalidation
+// a 304 instead of a full body.
+const (
+	// CacheNoStore forbids storing the response anywhere. Used for anything
+	// derived from a mutation, a credential, or a health probe.
+	CacheNoStore = "no-store"
+	// CachePublicRevalidate allows shared caches to keep the body but requires
+	// revalidation before reuse. Paired with an ETag this costs one small
+	// conditional request and never serves a stale page.
+	CachePublicRevalidate = "public, max-age=0, must-revalidate"
+)
+
+// MarshalJSON encodes payload once, so a caller can both write it and hash it
+// without encoding twice.
+func MarshalJSON(payload any) ([]byte, error) {
+	return json.Marshal(payload)
 }
 
-// WriteJSON encodes payload with the given status code. A nil payload writes the
-// status line only.
+// WriteJSON writes payload with the given status, forbidding storage.
+//
+// It is the default on purpose: a handler that forgets to think about caching
+// gets the safe answer (nothing is cached) rather than a browser guessing from
+// the URL. Reads that are safe to cache use WriteJSONCached and say so.
 func WriteJSON(w http.ResponseWriter, logger *slog.Logger, status int, payload any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(status)
-	if payload == nil {
+	body, err := MarshalJSON(payload)
+	if err != nil {
+		// The payload is a value type the server built; failing to encode it is
+		// a programming error, not a client problem. Report it as such instead
+		// of sending a truncated body under a 200.
+		logger.Error("encode response body", slog.Any("error", err))
+		WriteProblem(w, nil, logger, http.StatusInternalServerError)
 		return
 	}
-	if err := json.NewEncoder(w).Encode(payload); err != nil {
-		// The status line and headers are already on the wire, so the only
-		// remaining recovery is to record the failure.
+	writeBody(w, status, ContentTypeJSON, CacheNoStore, body)
+}
+
+// WriteJSONBytes writes an already-encoded JSON body, uncacheable.
+//
+// It exists for idempotent replays: the bytes that get recorded have to be the
+// exact bytes a later retry returns, so the handler encodes once and both paths
+// write the same slice. Re-encoding the value would produce equivalent JSON, but
+// "equivalent" is not what the client sees — key order and number formatting
+// can differ between two encodes of the same struct.
+func WriteJSONBytes(w http.ResponseWriter, status int, body []byte) {
+	writeBody(w, status, ContentTypeJSON, CacheNoStore, body)
+}
+
+// WriteJSONCached writes a cacheable read, revalidating with an ETag.
+//
+// The ETag is computed from the encoded body rather than from a version column:
+// it costs one hash of a payload that is already in memory, cannot drift from
+// what was actually sent, and needs no extra query. When the client sends a
+// matching If-None-Match the answer is 304 — same ETag and Cache-Control, no
+// body, which is the whole point of doing this.
+func WriteJSONCached(w http.ResponseWriter, r *http.Request, logger *slog.Logger, status int, payload any, cacheControl string) {
+	body, err := MarshalJSON(payload)
+	if err != nil {
 		logger.Error("encode response body", slog.Any("error", err))
+		WriteProblem(w, nil, logger, http.StatusInternalServerError)
+		return
+	}
+
+	etag := weakETag(body)
+	header := w.Header()
+	header.Set("ETag", etag)
+	if status == http.StatusOK && matchesETag(r.Header.Get("If-None-Match"), etag) {
+		// A 304 must repeat the cache headers, otherwise the stored response
+		// loses the freshness information it was revalidated for.
+		header.Set("Cache-Control", cacheControl)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	writeBody(w, status, ContentTypeJSON, cacheControl, body)
+}
+
+// writeBody sets the headers every JSON response shares and writes the payload.
+func writeBody(w http.ResponseWriter, status int, contentType, cacheControl string, body []byte) {
+	header := w.Header()
+	// 204 and 304 carry no representation, so they carry no content type.
+	if status != http.StatusNoContent && status != http.StatusNotModified {
+		header.Set("Content-Type", contentType)
+	}
+	header.Set("Cache-Control", cacheControl)
+	header.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	if len(body) > 0 && status != http.StatusNoContent {
+		_, _ = w.Write(body)
 	}
 }
 
-// WriteError maps an error category to an HTTP status and a stable error code.
-// Unknown errors are logged in full and reported as a generic 500 so internal
-// details never reach the client.
-func WriteError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err error) {
-	status, code, message, field := classifyError(err)
-
-	entry := logger.With(
-		slog.String("request_id", RequestIDFromContext(r.Context())),
-		slog.String("method", r.Method),
-		slog.String("path", r.URL.Path),
-		slog.Int("status", status),
-	)
-	switch {
-	case status >= http.StatusInternalServerError:
-		entry.Error("request failed", slog.Any("error", err))
-	case status == statusClientClosedRequest:
-		entry.Info("client closed request", slog.Any("error", err))
-	default:
-		entry.Debug("request rejected", slog.Any("error", err))
-	}
-
-	WriteJSON(w, logger, status, errorBody{
-		Code:      code,
-		Message:   message,
-		Field:     field,
-		RequestID: RequestIDFromContext(r.Context()),
-	})
+// weakETag derives a validator from the exact bytes about to be sent.
+func weakETag(body []byte) string {
+	sum := sha256.Sum256(body)
+	return `W/"` + hex.EncodeToString(sum[:8]) + `"`
 }
 
-// statusClientClosedRequest is nginx's non-standard code for "the client went
-// away before we answered". Nothing is written to a closed connection anyway.
-const statusClientClosedRequest = 499
-
-func classifyError(err error) (status int, code, message, field string) {
-	var validationErr *apperr.ValidationError
-	if errors.As(err, &validationErr) {
-		return http.StatusUnprocessableEntity, "invalid_argument", validationErr.Message, validationErr.Field
+// matchesETag reports whether an If-None-Match header names etag.
+//
+// Both sides compare with the weakness marker stripped: a cache is allowed to
+// downgrade a strong validator to a weak one in transit, and treating that as a
+// mismatch would turn every conditional request into a full response.
+func matchesETag(header, etag string) bool {
+	for _, candidate := range strings.Split(header, ",") {
+		candidate = strings.TrimSpace(candidate)
+		switch {
+		case candidate == "":
+			continue
+		case candidate == "*":
+			return true
+		case candidate == etag:
+			return true
+		case strings.TrimPrefix(candidate, "W/") == strings.TrimPrefix(etag, "W/"):
+			return true
+		}
 	}
-
-	switch {
-	case errors.Is(err, apperr.ErrInvalid):
-		return http.StatusUnprocessableEntity, "invalid_argument", "request is invalid", ""
-	case errors.Is(err, apperr.ErrNotFound):
-		return http.StatusNotFound, "not_found", "resource not found", ""
-	case errors.Is(err, apperr.ErrConflict):
-		return http.StatusConflict, "conflict", "resource already exists", ""
-	case errors.Is(err, apperr.ErrUnavailable):
-		return http.StatusServiceUnavailable, "unavailable", "dependency unavailable", ""
-	case errors.Is(err, apperr.ErrUnauthorized):
-		return http.StatusUnauthorized, "unauthorized", "authentication required", ""
-	case errors.Is(err, context.Canceled):
-		return statusClientClosedRequest, "client_closed_request", "client closed request", ""
-	case errors.Is(err, context.DeadlineExceeded):
-		return http.StatusGatewayTimeout, "timeout", "request timed out", ""
-	default:
-		return http.StatusInternalServerError, "internal", "internal server error", ""
-	}
+	return false
 }

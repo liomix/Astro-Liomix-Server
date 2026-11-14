@@ -16,7 +16,19 @@ import (
 	"github.com/liomix/astro-liomix-server/internal/count"
 	"github.com/liomix/astro-liomix-server/internal/platform/config"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
+	"github.com/liomix/astro-liomix-server/internal/platform/idempotency"
+	"github.com/liomix/astro-liomix-server/internal/platform/postgres"
 )
+
+// idempotencyRetention is how long a recorded key stays replayable. It has to
+// outlive the longest retry window a client could plausibly have; a day covers
+// any sane one.
+const idempotencyRetention = 24 * time.Hour
+
+// startupTimeout bounds connecting to the database and applying migrations.
+// A database that is not answering should fail the process quickly and let the
+// supervisor retry, not leave a half-started server listening.
+const startupTimeout = 15 * time.Second
 
 // Build metadata, injected by the Makefile through -ldflags.
 var (
@@ -44,22 +56,50 @@ func run() error {
 	logger := newLogger(cfg.Env)
 	slog.SetDefault(logger)
 
-	// Storage adapter. Replacing this line with a SQL repository is the entire
-	// migration; nothing above or below depends on the implementation.
-	commentRepo := comment.NewMemoryRepository()
+	// Storage. The pool is opened and the schema brought up to date before the
+	// first request: a wrong DATABASE_URL or a pending migration should stop
+	// the process at startup, not surface as a 500 on the blog.
+	startupCtx, startupCancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer startupCancel()
 
-	// Demo data for local runs. A fixture that fails to load is a broken
-	// configuration, so it stops the process instead of starting empty — an
-	// empty thread looks like the feature was never wired up at all.
-	if cfg.Comment.SeedFile != "" {
-		seeded, err := comment.LoadSeed(context.Background(), commentRepo, cfg.Comment.SeedFile, time.Now())
-		if err != nil {
-			return fmt.Errorf("seed comments: %w", err)
+	db, err := postgres.Open(startupCtx, postgres.Config{
+		URL:             cfg.Database.URL,
+		MaxOpenConns:    cfg.Database.MaxOpenConns,
+		MaxIdleConns:    cfg.Database.MaxIdleConns,
+		ConnMaxLifetime: cfg.Database.ConnMaxLifetime,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("close database", slog.Any("error", err))
 		}
-		logger.Info("demo comments loaded",
-			slog.Int("comments", seeded),
-			slog.String("file", cfg.Comment.SeedFile),
-		)
+	}()
+
+	// Each module owns its DDL and applies it here, so adding a table is a
+	// migration file next to the module rather than an edit to this function.
+	if err := comment.Migrate(startupCtx, db); err != nil {
+		return err
+	}
+	if err := count.Migrate(startupCtx, db); err != nil {
+		return err
+	}
+	if err := idempotency.Migrate(startupCtx, db); err != nil {
+		return err
+	}
+	logger.Info("database ready", slog.String("dsn", postgres.Redact(cfg.Database.URL)))
+
+	commentRepo := comment.NewPostgresRepository(db)
+	idempotencyStore := idempotency.NewStore(db)
+
+	// Expired keys are pruned once at startup rather than on a ticker: the
+	// table only grows with retries, so a single pass per deploy keeps it
+	// bounded without adding a background goroutine to shut down.
+	if pruned, err := idempotencyStore.Prune(startupCtx, idempotencyRetention); err != nil {
+		logger.Warn("prune idempotency keys", slog.Any("error", err))
+	} else if pruned > 0 {
+		logger.Info("pruned idempotency keys", slog.Int64("rows", pruned))
 	}
 
 	commentService, err := comment.NewService(commentRepo,
@@ -70,7 +110,7 @@ func run() error {
 		return fmt.Errorf("build comment service: %w", err)
 	}
 
-	countService, err := count.NewService(count.NewMemoryRepository())
+	countService, err := count.NewService(count.NewPostgresRepository(db))
 	if err != nil {
 		return fmt.Errorf("build count service: %w", err)
 	}
@@ -87,6 +127,7 @@ func run() error {
 			comment.RegisterRoutes(mux, logger, commentService, comment.HTTPConfig{
 				MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 				AdminToken:   cfg.Admin.Token,
+				Idempotency:  idempotencyStore,
 			})
 			count.RegisterRoutes(mux, logger, countService, count.HTTPConfig{})
 		},

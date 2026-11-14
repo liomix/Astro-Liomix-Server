@@ -1,6 +1,10 @@
 package comment
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -9,23 +13,46 @@ import (
 
 	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
+	"github.com/liomix/astro-liomix-server/internal/platform/idempotency"
 )
 
 // DefaultMaxBodyBytes caps request bodies. The largest legitimate payload is a
 // maximum-length comment body plus JSON overhead.
 const DefaultMaxBodyBytes int64 = 32 << 10
 
+// idempotencyScope namespaces the keys of this endpoint. A key is only unique
+// within one operation: the same client-generated string posted to two
+// different endpoints must not collide.
+const idempotencyScope = "comments.create"
+
+// idempotencyKeyHeader is the request header carrying a client-generated key.
+const idempotencyKeyHeader = "Idempotency-Key"
+
+// idempotencyKeyMin/Max bound the key. The lower bound rejects keys too short
+// to be accidental-collision-free; the upper bound matches the column
+// constraint, so a bad key fails here with a readable message instead of as a
+// database error 500.
+const (
+	idempotencyKeyMin = 8
+	idempotencyKeyMax = 200
+)
+
 // HTTPConfig carries the transport-level tuning of the comment routes. The zero
 // value is usable: it applies DefaultMaxBodyBytes and mounts no admin routes.
 type HTTPConfig struct {
 	// MaxBodyBytes caps the size of an incoming request body.
 	MaxBodyBytes int64
-	// AdminToken guards the moderation route. When empty it is not mounted at
-	// all, so an unconfigured deployment cannot be moderated by anyone (rather
-	// than being moderated by everybody). Deleting is not in this group: it
-	// also accepts the per-comment credential handed to authors, so the route
-	// stays mounted and decides per request.
+	// AdminToken guards the moderation route and the unapproved listings. When
+	// empty those routes are not mounted and those listings are unreachable, so
+	// an unconfigured deployment cannot be moderated by anyone (rather than
+	// being moderated by everybody). Deleting is not in this group: it also
+	// accepts the per-comment credential handed to authors, so the route stays
+	// mounted and decides per request.
 	AdminToken string
+	// Idempotency records client keys so a retried POST returns the first
+	// comment instead of creating a second one. When nil the header is ignored
+	// and every retry creates a duplicate; cmd/server always provides a store.
+	Idempotency *idempotency.Store
 }
 
 // RegisterRoutes mounts the comment endpoints on mux. The caller owns the
@@ -46,6 +73,7 @@ func RegisterRoutes(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg H
 		logger:      logger,
 		maxBodySize: cfg.MaxBodyBytes,
 		adminToken:  cfg.AdminToken,
+		idempotency: cfg.Idempotency,
 	}
 
 	mux.HandleFunc("GET /api/v1/posts/{slug}/comments", h.list)
@@ -77,20 +105,111 @@ type commentHandler struct {
 	logger      *slog.Logger
 	maxBodySize int64
 	adminToken  string
+	idempotency *idempotency.Store
+}
+
+// createdResponse is a comment creation result, already encoded.
+//
+// The body is kept as bytes because the same slice is both sent to the client
+// and recorded as the idempotent outcome; re-encoding would risk sending one
+// thing and replaying another.
+type createdResponse struct {
+	status   int
+	body     []byte
+	location string
 }
 
 // create publishes a comment on a post. The comment is stored in the status
 // chosen by the moderation policy (pending by default), so the response carries
 // that status rather than implying publication.
+//
+// When the client sends an Idempotency-Key the request is executed at most
+// once: a retry with the same key and body gets the recorded response back
+// instead of a second comment. That is the difference between "the network
+// dropped after the write" and "the reader posted twice", and it is decided by
+// this handler rather than by the client disabling a button.
 func (h *commentHandler) create(w http.ResponseWriter, r *http.Request) {
-	var req createCommentRequest
-	if err := httpkit.DecodeJSON(w, r, h.maxBodySize, &req); err != nil {
+	body, err := httpkit.ReadBody(w, r, h.maxBodySize)
+	if err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
 
-	c, token, err := h.svc.CreateWithCredential(r.Context(), CreateInput{
-		PostSlug: r.PathValue("slug"),
+	var req createCommentRequest
+	if err := httpkit.DecodeInto(body, &req); err != nil {
+		httpkit.WriteError(w, r, h.logger, err)
+		return
+	}
+
+	key := strings.TrimSpace(r.Header.Get(idempotencyKeyHeader))
+	if key == "" || h.idempotency == nil {
+		h.publish(w, r, req)
+		return
+	}
+	if err := validateIdempotencyKey(key); err != nil {
+		httpkit.WriteError(w, r, h.logger, err)
+		return
+	}
+
+	claim, err := h.idempotency.Claim(r.Context(), idempotencyScope, key, hashRequest(body))
+	if err != nil {
+		httpkit.WriteError(w, r, h.logger, err)
+		return
+	}
+	switch claim.Outcome {
+	case idempotency.Replayed:
+		h.replay(w, claim)
+		return
+	case idempotency.InProgress:
+		httpkit.WriteError(w, r, h.logger, &apperr.DetailError{
+			Category: apperr.ErrConflict,
+			Message:  "a request with this idempotency key is still being processed; retry shortly",
+		})
+		return
+	case idempotency.Mismatch:
+		httpkit.WriteError(w, r, h.logger, &apperr.DetailError{
+			Category: apperr.ErrConflict,
+			Message:  "this idempotency key was already used with a different request body",
+		})
+		return
+	}
+
+	created, err := h.publishComment(r.Context(), r.PathValue("slug"), req)
+	if err != nil {
+		// Releasing the claim is what makes the key usable again: the write
+		// produced nothing, so a corrected retry should be allowed to run
+		// instead of being told to wait for a record that will never complete.
+		if releaseErr := h.idempotency.Release(r.Context(), idempotencyScope, key); releaseErr != nil {
+			h.logger.Error("release idempotency key", slog.Any("error", releaseErr))
+		}
+		httpkit.WriteError(w, r, h.logger, err)
+		return
+	}
+
+	// Record before sending: if the process dies between the two, the client
+	// sees no response and retries, and the retry replays this body. Recording
+	// afterwards would leave a completed write with no key, which is exactly
+	// the duplicate the key exists to prevent.
+	if err := h.idempotency.Complete(r.Context(), idempotencyScope, key, created.status, created.body); err != nil {
+		h.logger.Error("record idempotent response", slog.Any("error", err))
+	}
+	writeCreated(w, created)
+}
+
+// publish creates the comment and writes the response.
+func (h *commentHandler) publish(w http.ResponseWriter, r *http.Request, req createCommentRequest) {
+	created, err := h.publishComment(r.Context(), r.PathValue("slug"), req)
+	if err != nil {
+		httpkit.WriteError(w, r, h.logger, err)
+		return
+	}
+	writeCreated(w, created)
+}
+
+// publishComment runs the use case and encodes the response.
+func (h *commentHandler) publishComment(ctx context.Context, slug string, req createCommentRequest) (createdResponse, error) {
+	c, token, err := h.svc.CreateWithCredential(ctx, CreateInput{
+		PostSlug: slug,
 		ParentID: req.ParentID,
 		Author: CommentAuthor{
 			Name:    req.Author.Name,
@@ -100,15 +219,67 @@ func (h *commentHandler) create(w http.ResponseWriter, r *http.Request) {
 		Body: req.Body,
 	})
 	if err != nil {
-		httpkit.WriteError(w, r, h.logger, err)
-		return
+		return createdResponse{}, err
 	}
 
-	w.Header().Set("Location", "/api/v1/comments/"+c.ID)
-	httpkit.WriteJSON(w, h.logger, http.StatusCreated, createdCommentPayload{
+	body, err := httpkit.MarshalJSON(createdCommentPayload{
 		commentPayload: toCommentPayload(c),
 		DeleteToken:    token,
 	})
+	if err != nil {
+		return createdResponse{}, err
+	}
+	return createdResponse{
+		status:   http.StatusCreated,
+		body:     body,
+		location: commentLocation(c.ID),
+	}, nil
+}
+
+// replay answers a retry with the response the first attempt produced.
+func (h *commentHandler) replay(w http.ResponseWriter, claim idempotency.Result) {
+	// Location is not part of the recorded body, so it is recovered from it: a
+	// 201 without Location would force the client to parse the id out of the
+	// payload to find the resource it just created.
+	var stored struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(claim.Body, &stored); err == nil && stored.ID != "" {
+		w.Header().Set("Location", commentLocation(stored.ID))
+	}
+	w.Header().Set("Idempotency-Replayed", "true")
+	httpkit.WriteJSONBytes(w, claim.StatusCode, claim.Body)
+}
+
+// writeCreated sends a creation response.
+func writeCreated(w http.ResponseWriter, created createdResponse) {
+	w.Header().Set("Location", created.location)
+	httpkit.WriteJSONBytes(w, created.status, created.body)
+}
+
+// commentLocation is the canonical URL of a comment.
+func commentLocation(commentID string) string {
+	return "/api/v1/comments/" + commentID
+}
+
+// validateIdempotencyKey bounds a client-supplied key.
+func validateIdempotencyKey(key string) error {
+	if len(key) < idempotencyKeyMin || len(key) > idempotencyKeyMax {
+		return &apperr.ValidationError{
+			Field:   idempotencyKeyHeader,
+			Code:    apperr.FieldOutOfRange,
+			Message: "must be between 8 and 200 characters",
+		}
+	}
+	return nil
+}
+
+// hashRequest summarises the exact bytes the client sent. Two requests with the
+// same key but different bodies are a client bug, and the hash is what lets the
+// service say so instead of replaying an answer to a question nobody asked.
+func hashRequest(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
 
 // get returns a single comment by ID.
@@ -119,7 +290,7 @@ func (h *commentHandler) create(w http.ResponseWriter, r *http.Request) {
 func (h *commentHandler) get(w http.ResponseWriter, r *http.Request) {
 	commentID := r.PathValue("id")
 	if commentID == "" {
-		httpkit.WriteError(w, r, h.logger, &apperr.ValidationError{Field: "id", Message: "is required"})
+		httpkit.WriteError(w, r, h.logger, &apperr.ValidationError{Field: "id", Code: apperr.FieldRequired, Message: "is required"})
 		return
 	}
 
@@ -128,11 +299,17 @@ func (h *commentHandler) get(w http.ResponseWriter, r *http.Request) {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
-	if c.Status != StatusApproved && !httpkit.HasBearer(r, h.adminToken) {
+	if c.Status != StatusApproved {
+		if httpkit.HasBearer(r, h.adminToken) {
+			// Unpublished content answered to a credential must not be stored
+			// anywhere: a shared cache would hand it to the next reader.
+			httpkit.WriteJSON(w, h.logger, http.StatusOK, toCommentPayload(c))
+			return
+		}
 		httpkit.WriteError(w, r, h.logger, apperr.ErrNotFound)
 		return
 	}
-	httpkit.WriteJSON(w, h.logger, http.StatusOK, toCommentPayload(c))
+	httpkit.WriteJSONCached(w, r, h.logger, http.StatusOK, toCommentPayload(c), httpkit.CachePublicRevalidate)
 }
 
 // updateStatus changes a comment's moderation state.
@@ -169,19 +346,26 @@ func (h *commentHandler) delete(w http.ResponseWriter, r *http.Request) {
 	case presented != "":
 		err = h.svc.DeleteOwned(r.Context(), commentID, presented)
 	default:
-		// RFC 9110: a 401 must say which scheme the client should use.
-		w.Header().Set("WWW-Authenticate", `Bearer realm="comment-author"`)
-		httpkit.WriteError(w, r, h.logger, apperr.ErrUnauthorized)
+		writeAuthChallenge(w, r, h.logger, `Bearer realm="comment-author"`)
 		return
 	}
 	if err != nil {
 		if errors.Is(err, apperr.ErrUnauthorized) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="comment-author"`)
+			writeAuthChallenge(w, r, h.logger, `Bearer realm="comment-author", error="invalid_token"`)
+			return
 		}
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
 	httpkit.WriteJSON(w, h.logger, http.StatusNoContent, nil)
+}
+
+// writeAuthChallenge answers 401, naming the scheme the client should use.
+// RFC 9110 requires the header, and a client that cannot tell which scheme to
+// present can only guess.
+func writeAuthChallenge(w http.ResponseWriter, r *http.Request, logger *slog.Logger, challenge string) {
+	w.Header().Set("WWW-Authenticate", challenge)
+	httpkit.WriteError(w, r, logger, apperr.ErrUnauthorized)
 }
 
 // counts answers how many approved comments each requested post has.
@@ -200,12 +384,12 @@ func (h *commentHandler) counts(w http.ResponseWriter, r *http.Request) {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
-	httpkit.WriteJSON(w, h.logger, http.StatusOK, commentCountsResponse{
-		Items: toCommentCountPayloads(counts),
-	})
+	httpkit.WriteJSONCached(w, r, h.logger, http.StatusOK,
+		commentCountsResponse{Items: toCommentCountPayloads(counts)},
+		httpkit.CachePublicRevalidate)
 }
 
-// list returns the comments of a post, newest first.
+// list returns one page of a post's comments, newest first.
 func (h *commentHandler) list(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 
@@ -219,19 +403,34 @@ func (h *commentHandler) list(w http.ResponseWriter, r *http.Request) {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
-	offset, err := queryInt(r, "offset", 0)
+	cursor, err := DecodeCursor(query.Get("cursor"))
 	if err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
+	}
+
+	cacheControl := httpkit.CachePublicRevalidate
+	if status != StatusApproved {
+		// Unmoderated states are the site owner's view, so the listing needs a
+		// credential — and once a credential is involved the response must not
+		// reach a shared cache.
+		if !httpkit.HasBearer(r, h.adminToken) {
+			writeAuthChallenge(w, r, h.logger, `Bearer realm="moderator"`)
+			return
+		}
+		cacheControl = httpkit.CacheNoStore
 	}
 
 	q := Query{
 		PostSlug: r.PathValue("slug"),
 		Status:   status,
 		Limit:    limit,
-		Offset:   offset,
 	}
-	comments, err := h.svc.List(r.Context(), q)
+	if cursor.ID != "" {
+		q.Cursor = &cursor
+	}
+
+	comments, nextCursor, err := h.svc.List(r.Context(), q)
 	if err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
@@ -241,14 +440,11 @@ func (h *commentHandler) list(w http.ResponseWriter, r *http.Request) {
 	for _, c := range comments {
 		items = append(items, toCommentPayload(c))
 	}
-	httpkit.WriteJSON(w, h.logger, http.StatusOK, listCommentsResponse{
-		Items: items,
-		Pagination: pagination{
-			Limit:  limit,
-			Offset: offset,
-			Count:  len(items),
-		},
-	})
+	page := listCommentsResponse{Items: items}
+	if nextCursor != "" {
+		page.NextCursor = &nextCursor
+	}
+	httpkit.WriteJSONCached(w, r, h.logger, http.StatusOK, page, cacheControl)
 }
 
 // parseStatusFilter applies the public default: only approved comments are
@@ -264,7 +460,8 @@ func parseStatusFilter(raw string) (CommentStatus, error) {
 		if !status.Valid() {
 			return "", &apperr.ValidationError{
 				Field:   "status",
-				Message: "must be one of approved, pending, rejected, spam or all",
+				Code:    apperr.FieldInvalid,
+				Message: "must be one of " + statusList + " or all",
 			}
 		}
 		return status, nil
@@ -278,10 +475,10 @@ func queryInt(r *http.Request, name string, fallback int) (int, error) {
 	}
 	value, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, &apperr.ValidationError{Field: name, Message: "must be an integer"}
+		return 0, &apperr.ValidationError{Field: name, Code: apperr.FieldInvalidFormat, Message: "must be an integer"}
 	}
 	if value < 0 {
-		return 0, &apperr.ValidationError{Field: name, Message: "must not be negative"}
+		return 0, &apperr.ValidationError{Field: name, Code: apperr.FieldOutOfRange, Message: "must not be negative"}
 	}
 	return value, nil
 }

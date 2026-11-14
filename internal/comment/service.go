@@ -127,9 +127,10 @@ type CreateInput struct {
 // by default) and is returned as stored, including server-assigned fields.
 //
 // It issues no delete credential: callers that do (the HTTP transport, so the
-// author can take their comment back) use CreateWithCredential. Seed data and
-// tests take this path on purpose — a fixture has no author to hand a secret
-// to, and minting one per row would only create credentials nobody can use.
+// author can take their comment back) use CreateWithCredential. Imports and
+// tests take this path on purpose — an imported row has no author to hand a
+// secret to, and minting one per row would only create credentials nobody can
+// use.
 func (s *Service) Create(ctx context.Context, in CreateInput) (*Comment, error) {
 	c, err := s.prepareComment(ctx, in)
 	if err != nil {
@@ -176,7 +177,7 @@ func (s *Service) persist(ctx context.Context, c *Comment) (*Comment, error) {
 // store builds and reviews a comment without touching the repository. It is
 // the shared front half of both create paths.
 func (s *Service) prepareComment(ctx context.Context, in CreateInput) (*Comment, error) {
-	now := s.now().UTC()
+	now := s.timestamp()
 	c := &Comment{
 		ID:       s.ids.New(),
 		PostSlug: strings.TrimSpace(in.PostSlug),
@@ -217,19 +218,35 @@ func (s *Service) Get(ctx context.Context, commentID string) (*Comment, error) {
 	return c, nil
 }
 
-// List returns comments filtered by q, newest first. Limit is clamped to the
-// configured page size so a client cannot ask for an unbounded page.
-func (s *Service) List(ctx context.Context, q Query) ([]*Comment, error) {
+// List returns one page of comments, newest first, plus the cursor that
+// continues after it.
+//
+// The limit is clamped to the configured maximum so a client cannot ask for an
+// unbounded page. The next cursor is empty exactly when the page is the last
+// one, which the service decides by asking the repository for one row more than
+// the page holds: a second COUNT query would cost more than the page itself on
+// a long thread, and would disagree with it anyway if a comment arrived in
+// between.
+func (s *Service) List(ctx context.Context, q Query) ([]*Comment, string, error) {
 	if err := q.Validate(); err != nil {
-		return nil, fmt.Errorf("validate query: %w", err)
+		return nil, "", fmt.Errorf("validate query: %w", err)
 	}
 	q.Limit = s.clampLimit(q.Limit)
 
-	comments, err := s.repo.List(ctx, q)
+	page := q
+	page.Limit = q.Limit + 1
+
+	comments, err := s.repo.List(ctx, page)
 	if err != nil {
-		return nil, fmt.Errorf("list comments: %w", err)
+		return nil, "", fmt.Errorf("list comments: %w", err)
 	}
-	return comments, nil
+	if len(comments) <= q.Limit {
+		return comments, "", nil
+	}
+
+	comments = comments[:q.Limit]
+	last := comments[len(comments)-1]
+	return comments, EncodeCursor(Cursor{CreatedAt: last.CreatedAt, ID: last.ID}), nil
 }
 
 // CountByPost reports how many comments each requested post has.
@@ -315,7 +332,7 @@ func (s *Service) SetStatus(ctx context.Context, commentID string, status Commen
 		return nil, &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
 	}
 
-	updated, err := s.repo.UpdateStatus(ctx, commentID, status, s.now().UTC())
+	updated, err := s.repo.UpdateStatus(ctx, commentID, status, s.timestamp())
 	if err != nil {
 		return nil, fmt.Errorf("update comment %q: %w", commentID, err)
 	}
@@ -350,7 +367,8 @@ func (s *Service) Delete(ctx context.Context, commentID string) error {
 // The token is checked against the stored digest before the row is touched, so
 // a wrong guess cannot delete anything and cannot tell an existing comment from
 // a missing one by the number of round trips. A comment created without a
-// credential (seed data, imports) is never deletable this way.
+// credential (imports, or a row written before credentials existed) is never
+// deletable this way.
 func (s *Service) DeleteOwned(ctx context.Context, commentID, token string) error {
 	commentID = strings.TrimSpace(commentID)
 	if commentID == "" {
@@ -370,6 +388,17 @@ func (s *Service) DeleteOwned(ctx context.Context, commentID, token string) erro
 	}
 	s.logger.InfoContext(ctx, "comment deleted by author", slog.String("comment_id", commentID))
 	return nil
+}
+
+// timestamp is the clock reading trimmed to the precision storage keeps.
+//
+// timestamptz holds microseconds, so a value with nanoseconds looks the same
+// until it is read back — and then it is not. A client that compares the
+// createdAt of a POST response with the one from a later GET would see two
+// different strings for one comment. Trimming at the only place that mints
+// times keeps the two answers identical.
+func (s *Service) timestamp() time.Time {
+	return s.now().UTC().Truncate(time.Microsecond)
 }
 
 // PageSize returns the default page size applied to listings.
@@ -398,9 +427,9 @@ func (s *Service) checkParent(ctx context.Context, c *Comment) error {
 
 // resolveParent returns the comment c replies to.
 //
-// It lives outside Service because LoadSeed fills the repository directly and
-// still has to apply the same rule: a fixture that can build a cross-post
-// thread, but that the API would reject, is a fixture that hides a bug.
+// It lives outside Service so that any caller writing a comment directly — an
+// import, a repair script — applies the same rule: a thread the API would
+// reject must not be creatable by another path either.
 func resolveParent(ctx context.Context, repo Repository, c *Comment) (*Comment, error) {
 	parent, err := repo.Get(ctx, c.ParentID)
 	if err != nil {

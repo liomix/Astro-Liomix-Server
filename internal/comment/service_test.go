@@ -431,11 +431,14 @@ func TestServiceListClampsLimit(t *testing.T) {
 			repo := &capturingRepository{onList: func(q comment.Query) { got = q }}
 			svc := newService(t, repo)
 
-			if _, err := svc.List(context.Background(), comment.Query{PostSlug: "hello-astro", Limit: tt.limit}); err != nil {
+			if _, _, err := svc.List(context.Background(), comment.Query{PostSlug: "hello-astro", Limit: tt.limit}); err != nil {
 				t.Fatalf("List() error = %v", err)
 			}
-			if got.Limit != tt.want {
-				t.Errorf("limit passed to repository = %d, want %d", got.Limit, tt.want)
+			// One row beyond the page: that extra row is how the service knows
+			// whether to hand back a next cursor, without a second COUNT.
+			if got.Limit != tt.want+1 {
+				t.Errorf("limit passed to repository = %d, want %d (page size %d plus the lookahead)",
+					got.Limit, tt.want+1, tt.want)
 			}
 		})
 	}
@@ -449,7 +452,7 @@ func TestServiceListRejectsNegativeLimit(t *testing.T) {
 	}}
 	svc := newService(t, repo)
 
-	_, err := svc.List(context.Background(), comment.Query{PostSlug: "hello-astro", Limit: -1})
+	_, _, err := svc.List(context.Background(), comment.Query{PostSlug: "hello-astro", Limit: -1})
 	if !errors.Is(err, apperr.ErrInvalid) {
 		t.Fatalf("List() error = %v, want it to wrap apperr.ErrInvalid", err)
 	}

@@ -1,11 +1,15 @@
 openapi: 3.1.0
 info:
   title: Astro Liomix Blog API
-  version: 0.5.0
+  version: 0.6.0
   description: >
     Comment and traffic-counting API for the blog. New comments enter moderation
-    and are not part of the public listing until approved. Storage adapters are
-    in-memory for now; the HTTP contract is stable.
+    and are not part of the public listing until approved.
+
+
+    Errors are RFC 9457 problem documents (`application/problem+json`) with a
+    stable `code` for clients to branch on. Listings page with an opaque cursor
+    instead of an offset, and every response states its caching policy.
 servers:
   - url: http://localhost:8080
     description: Local development
@@ -25,6 +29,9 @@ paths:
       responses:
         "200":
           description: Process is alive
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
           content:
             application/json:
               schema:
@@ -50,37 +57,66 @@ paths:
       summary: List comments of a post
       operationId: listComments
       description: >
-        Returns comments newest first. Only approved comments are returned
-        unless another status (or `all`) is requested, so comments awaiting
-        moderation never leak publicly.
+        Returns one page of comments, newest first, ordered by `(createdAt, id)`
+        so the order is total and a page boundary can never repeat or skip a
+        row.
+
+
+        Only approved comments are returned by default. Asking for any other
+        moderation state — or `all` — requires the admin token, because the
+        moderation queue is not public; without it the request is answered with
+        401 rather than an empty page that would read as "nothing to review".
+
+
+        Public pages are cacheable and revalidated with `ETag`; a credentialled
+        page is `no-store`.
+      security:
+        - {}
+        - adminToken: []
       parameters:
         - name: status
           in: query
-          description: Moderation filter. Defaults to `approved`.
+          description: >
+            Moderation filter. Defaults to `approved`. Any other value requires
+            the admin token.
           schema:
             type: string
             enum: [approved, pending, rejected, spam, all]
         - name: limit
           in: query
-          description: Page size. Clamped to the server maximum (100 by default).
+          description: Page size. Values above the server maximum are clamped to it.
           schema:
             type: integer
             minimum: 0
             maximum: 100
             default: 20
-        - name: offset
+        - name: cursor
           in: query
+          description: >
+            Opaque token from the previous page's `nextCursor`. Omit it for the
+            newest page. The token names the last row of the previous page, so
+            comments posted in between do not shift what comes next — unlike an
+            offset, which would repeat or skip rows as the thread grows.
           schema:
-            type: integer
-            minimum: 0
-            default: 0
+            type: string
       responses:
         "200":
           description: A page of comments
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/Cacheable"
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CommentList"
+                $ref: "#/components/schemas/CommentPage"
+        "304":
+          $ref: "#/components/responses/NotModified"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
         "422":
           $ref: "#/components/responses/InvalidInput"
     post:
@@ -91,6 +127,25 @@ paths:
         Validates and stores a comment. The response carries the moderation
         status, which is `pending` by default, so a 201 does not mean the
         comment is publicly visible.
+
+
+        Send `Idempotency-Key` to make a retry safe. The client generates one
+        string per submission and reuses it for every retry of that submission:
+        the first retry after a lost response replays the stored 201 instead of
+        creating a second comment. The same key with a different body is
+        answered with 409, because that is a client bug rather than a retry.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: >
+            Client-generated key, 8–200 characters, unique per submission and
+            stable across retries of that submission. Optional; without it every
+            retry creates a new comment.
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 200
       requestBody:
         required: true
         content:
@@ -99,16 +154,30 @@ paths:
               $ref: "#/components/schemas/CreateCommentRequest"
       responses:
         "201":
-          description: Comment stored
+          description: Comment stored (or replayed from an idempotent retry)
           headers:
             Location:
               description: URL of the created comment.
+              schema:
+                type: string
+            Idempotency-Replayed:
+              description: >
+                `true` when this response is a replay of an earlier request with
+                the same Idempotency-Key; absent otherwise.
               schema:
                 type: string
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CreatedComment"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
         "422":
           $ref: "#/components/responses/InvalidInput"
 
@@ -134,10 +203,17 @@ paths:
       responses:
         "200":
           description: One entry per requested post, in request order
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/Cacheable"
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CommentCountList"
+        "304":
+          $ref: "#/components/responses/NotModified"
         "422":
           $ref: "#/components/responses/InvalidInput"
 
@@ -149,7 +225,10 @@ paths:
       description: >
         A comment that is not approved is reported as 404 unless the request
         carries the admin token: guessing an ID must not expose content that is
-        still awaiting moderation.
+        still awaiting moderation. That credentialled response is `no-store`.
+      security:
+        - {}
+        - adminToken: []
       parameters:
         - name: id
           in: path
@@ -159,10 +238,17 @@ paths:
       responses:
         "200":
           description: The comment
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/Cacheable"
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/Comment"
+        "304":
+          $ref: "#/components/responses/NotModified"
         "404":
           $ref: "#/components/responses/NotFound"
     delete:
@@ -178,8 +264,13 @@ paths:
         Two credentials are accepted. The admin token deletes anything. The
         `deleteToken` returned by POST deletes only the comment it was issued
         for — that is how a reader takes back something they wrote, without an
-        account. A comment created without a token (seeded or imported data) can
-        only be deleted with the admin token.
+        account. A comment created without a token (imported data) can only be
+        deleted with the admin token.
+
+
+        Deleting an already-deleted comment answers 404: the absence is the
+        state the caller wanted, so a client treating this as failure would lie
+        to the user about a comment that is already gone.
       security:
         - adminToken: []
         - commentAuthorToken: []
@@ -227,6 +318,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Comment"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "404":
@@ -246,10 +339,17 @@ paths:
       responses:
         "200":
           description: The current counters
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/Cacheable"
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SiteStats"
+        "304":
+          $ref: "#/components/responses/NotModified"
         "503":
           $ref: "#/components/responses/Unavailable"
 
@@ -272,10 +372,17 @@ paths:
       responses:
         "200":
           description: Visit counted
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/SiteStats"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
         "422":
           $ref: "#/components/responses/InvalidInput"
         "503":
@@ -302,10 +409,17 @@ paths:
       responses:
         "200":
           description: One entry per requested slug, in request order
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/Cacheable"
+            ETag:
+              $ref: "#/components/headers/ETag"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/PostViewsList"
+        "304":
+          $ref: "#/components/responses/NotModified"
         "422":
           $ref: "#/components/responses/InvalidInput"
         "503":
@@ -330,10 +444,17 @@ paths:
       responses:
         "200":
           description: Read counted
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/PostViews"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
         "422":
           $ref: "#/components/responses/InvalidInput"
         "503":
@@ -345,8 +466,9 @@ components:
       type: http
       scheme: bearer
       description: >
-        Shared secret from ADMIN_TOKEN. When the server has no token configured
-        the moderation route is not mounted at all and answers 404.
+        Shared secret from ADMIN_TOKEN. It moderates comments, reads the
+        unapproved queue, and deletes anything. When the server has no token
+        configured the moderation route is not mounted at all and answers 404.
     commentAuthorToken:
       type: http
       scheme: bearer
@@ -355,53 +477,158 @@ components:
         Scoped to that one comment: it cannot read, moderate or delete anything
         else. Never returned by a read, so it is lost if the client does not
         keep it.
+
+  headers:
+    Cacheable:
+      description: >
+        Public, but always revalidated. Paired with an ETag, so a repeat request
+        costs a conditional 304 rather than a full body.
+      schema:
+        type: string
+        const: public, max-age=0, must-revalidate
+    NoStore:
+      description: Must not be stored anywhere — the response reflects a mutation or a credential.
+      schema:
+        type: string
+        const: no-store
+    ETag:
+      description: Weak validator of the exact response body; send it back as If-None-Match.
+      schema:
+        type: string
+
   responses:
+    MalformedRequest:
+      description: >
+        The request body could not be read: broken JSON, an empty body where one
+        is required, a cursor this API never issued, or two JSON values.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     InvalidInput:
-      description: The request failed validation.
+      description: >
+        The request parsed but violates the contract. Every failing field is
+        listed, so a form can be corrected in one round trip.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/Problem"
     NotFound:
-      description: No resource matches the request.
+      description: >
+        No resource matches the request, or its existence is deliberately not
+        revealed (an unapproved comment read without a credential).
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/Problem"
+    Conflict:
+      description: >
+        The request collides with current state: an idempotency key reused with
+        a different body, or a first request still running under that key.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
     Unavailable:
       description: A dependency could not serve the request.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/Problem"
     Unauthorized:
-      description: The request did not carry a valid admin token.
+      description: >
+        The request did not present a usable credential, or presented one that
+        does not match. A 401 always carries a Bearer challenge naming the
+        scheme the client should use.
       headers:
         WWW-Authenticate:
           schema:
             type: string
           description: Always a Bearer challenge.
       content:
-        application/json:
+        application/problem+json:
           schema:
-            $ref: "#/components/schemas/Error"
+            $ref: "#/components/schemas/Problem"
+    PayloadTooLarge:
+      description: The request body exceeds the endpoint's limit.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    UnsupportedMedia:
+      description: The request body is not declared as application/json.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    NotModified:
+      description: The stored copy is still current; no body is returned.
+      headers:
+        ETag:
+          $ref: "#/components/headers/ETag"
+        Cache-Control:
+          $ref: "#/components/headers/Cacheable"
 
   schemas:
-    Error:
+    Problem:
       type: object
-      required: [code, message]
+      description: >
+        RFC 9457 problem document. Clients branch on `code` and never on
+        `title` or `detail`, which are written for the developer reading the
+        response and may change wording or language.
+      required: [title, status, code]
       properties:
+        title:
+          type: string
+          description: Stable, short summary of `code`. Same code, same title.
+          examples: [Request validation failed]
+        status:
+          type: integer
+          description: Repeats the HTTP status so a rewritten status line cannot change the meaning.
+          examples: [422]
         code:
           type: string
-          examples: [invalid_argument, not_found, conflict, internal]
-        message:
+          description: >
+            Machine-readable identifier. Stable once published and never reused
+            for a different failure.
+          examples: [VALIDATION_FAILED, MALFORMED_REQUEST, RESOURCE_NOT_FOUND]
+        detail:
           type: string
+          description: >
+            Optional sentence about this occurrence, written by the server. It
+            is present only where the response was written for it; a wrapped
+            database error never becomes a detail, so it can be shown to a user
+            when the contract says so.
+        instance:
+          type: string
+          description: Request path that produced the problem.
+          examples: [/api/v1/posts/hello-astro/comments]
+        traceId:
+          type: string
+          description: Matches the X-Request-Id response header and the server log line.
+        errors:
+          type: array
+          description: Every field that failed validation, not just the first.
+          items:
+            $ref: "#/components/schemas/FieldProblem"
+
+    FieldProblem:
+      type: object
+      required: [field, code, message]
+      properties:
         field:
           type: string
-          description: Offending field, present for validation failures.
-        requestId:
+          description: >
+            Path into the request body (author.email, items[0].quantity) so the
+            client can attach the message to the right input.
+          examples: [author.email]
+        code:
           type: string
-          description: Correlation ID, also returned in the X-Request-Id header.
+          description: Why this field was rejected.
+          examples: [REQUIRED, TOO_LONG, INVALID_FORMAT, OUT_OF_RANGE]
+        message:
+          type: string
+          description: Human-readable explanation, developer-facing.
 
     CommentAuthorInput:
       type: object
@@ -421,17 +648,20 @@ components:
 
     CommentAuthor:
       type: object
-      required: [name]
+      required: [name, website]
       properties:
         name:
           type: string
         website:
           type: string
+          description: Empty string when the author left none.
 
     CreateCommentRequest:
       type: object
       required: [author, body]
-      additionalProperties: false
+      description: >
+        Unknown fields are ignored rather than rejected, so a client can ship a
+        new optional field before the server supports it.
       properties:
         parentId:
           type: string
@@ -446,7 +676,6 @@ components:
     UpdateCommentStatusRequest:
       type: object
       required: [status]
-      additionalProperties: false
       properties:
         status:
           type: string
@@ -455,14 +684,18 @@ components:
 
     Comment:
       type: object
-      required: [id, postSlug, author, body, status, createdAt, updatedAt]
+      required: [id, postSlug, parentId, author, body, status, createdAt, updatedAt]
       properties:
         id:
           type: string
         postSlug:
           type: string
         parentId:
-          type: string
+          type: [string, "null"]
+          description: >
+            Null for a top-level comment. The key is always present, so the
+            client can tell "a root comment" from "a response that did not
+            include the field".
         author:
           $ref: "#/components/schemas/CommentAuthor"
         body:
@@ -470,12 +703,17 @@ components:
         status:
           type: string
           enum: [pending, approved, rejected, spam]
+          description: >
+            Clients must tolerate values they do not know: a new state is a
+            compatible addition, not a breaking change.
         createdAt:
           type: string
           format: date-time
+          description: RFC 3339, always UTC.
         updatedAt:
           type: string
           format: date-time
+          description: RFC 3339, always UTC.
 
     CreatedComment:
       description: >
@@ -492,24 +730,20 @@ components:
                 Bearer credential for DELETE /api/v1/comments/{id}. Store it on
                 the client; the server keeps only its digest.
 
-    CommentList:
+    CommentPage:
       type: object
-      required: [items, pagination]
+      required: [items, nextCursor]
       properties:
         items:
           type: array
           items:
             $ref: "#/components/schemas/Comment"
-        pagination:
-          type: object
-          required: [limit, offset, count]
-          properties:
-            limit:
-              type: integer
-            offset:
-              type: integer
-            count:
-              type: integer
+        nextCursor:
+          type: [string, "null"]
+          description: >
+            Token for the next page, or null when this is the last one. Pass it
+            back as `cursor`. Do not build one by hand: the ordering key is the
+            server's business.
 
     CommentCountList:
       type: object
@@ -530,7 +764,6 @@ components:
 
     RecordVisitRequest:
       type: object
-      additionalProperties: false
       description: >
         The body may be an empty object when the client has no visitor
         identifier; the view is still counted.
@@ -563,7 +796,6 @@ components:
     RecordPostViewRequest:
       type: object
       required: [slug]
-      additionalProperties: false
       properties:
         slug:
           type: string

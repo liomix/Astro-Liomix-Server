@@ -2,7 +2,7 @@
 // visited today, and later how often each article is read.
 //
 // The module has the same shape as internal/comment: entities with their
-// invariants, the use cases, an in-memory repository and the HTTP transport.
+// invariants, the use cases, a PostgreSQL repository and the HTTP transport.
 // Counting a visit is a read-modify-write on shared state, so the storage port
 // in port.go owns the atomicity while this package owns what the numbers mean.
 package count

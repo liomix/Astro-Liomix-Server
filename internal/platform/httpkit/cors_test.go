@@ -201,6 +201,58 @@ func TestWithCORSAdvertisesAuthorDelete(t *testing.T) {
 	}
 }
 
+func TestWithCORSAdvertisesModerationAndIdempotency(t *testing.T) {
+	t.Parallel()
+
+	// PATCH is how the site owner moderates, and Idempotency-Key is how a
+	// create is retried safely. Advertising only what a read needs leaves both
+	// of those blocked at preflight, where the server cannot even answer.
+	next := &nextRecorder{}
+	handler := httpkit.WithCORS(httpkit.CORSConfig{AllowedOrigins: []string{"*"}}, next.handler())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/comments/abc/status", nil)
+	req.Header.Set("Origin", "https://blog.example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPatch)
+	req.Header.Set("Access-Control-Request-Headers", "authorization,idempotency-key,if-none-match")
+	handler.ServeHTTP(rec, req)
+
+	methods := rec.Header().Get("Access-Control-Allow-Methods")
+	headers := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers"))
+	for _, want := range []string{http.MethodPatch, http.MethodDelete, http.MethodPost} {
+		if !strings.Contains(methods, want) {
+			t.Errorf("Access-Control-Allow-Methods = %q, want it to include %s", methods, want)
+		}
+	}
+	for _, want := range []string{"idempotency-key", "if-none-match"} {
+		if !strings.Contains(headers, want) {
+			t.Errorf("Access-Control-Allow-Headers = %q, want it to include %s", headers, want)
+		}
+	}
+}
+
+func TestWithCORSExposesTheHeadersTheClientReads(t *testing.T) {
+	t.Parallel()
+
+	// Custom response headers are invisible to fetch() unless they are listed.
+	// headers.get("X-Request-Id") returning null with no warning is the classic
+	// "the frontend says it errored, the backend says it never saw it" bug.
+	next := &nextRecorder{status: http.StatusOK}
+	handler := httpkit.WithCORS(httpkit.CORSConfig{AllowedOrigins: []string{"*"}}, next.handler())
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/posts/hello/comments", nil)
+	req.Header.Set("Origin", "https://blog.example.com")
+	handler.ServeHTTP(rec, req)
+
+	exposed := strings.ToLower(rec.Header().Get("Access-Control-Expose-Headers"))
+	for _, want := range []string{"x-request-id", "location", "etag", "retry-after"} {
+		if !strings.Contains(exposed, want) {
+			t.Errorf("Access-Control-Expose-Headers = %q, want it to include %s", exposed, want)
+		}
+	}
+}
+
 func TestWithCORSPlainOptionsPassesThrough(t *testing.T) {
 	t.Parallel()
 

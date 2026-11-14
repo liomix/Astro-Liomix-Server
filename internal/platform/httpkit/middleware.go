@@ -58,17 +58,19 @@ func WithRecovery(logger *slog.Logger, next http.Handler) http.Handler {
 				slog.Any("panic", recovered),
 				slog.String("stack", string(debug.Stack())),
 			)
-			WriteJSON(w, logger, http.StatusInternalServerError, errorBody{
-				Code:      "internal",
-				Message:   "internal server error",
-				RequestID: RequestIDFromContext(r.Context()),
-			})
+			WriteProblem(w, r, logger, http.StatusInternalServerError)
 		}()
 		next.ServeHTTP(w, r)
 	})
 }
 
 // WithLogging records one structured line per request.
+//
+// The path is logged as the matched route template (`/api/v1/comments/{id}`),
+// falling back to the raw path only when nothing matched. Logging concrete ids
+// multiplies the cardinality of every aggregation over these lines by the
+// number of rows in the table, which is why "top paths" dashboards built on
+// naive logging are useless.
 func WithLogging(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -80,9 +82,14 @@ func WithLogging(logger *slog.Logger, next http.Handler) http.Handler {
 		if recorder.status >= http.StatusInternalServerError {
 			level = slog.LevelError
 		}
+		route := r.Pattern
+		if route == "" {
+			route = r.URL.Path
+		}
 		logger.Log(r.Context(), level, "http request",
 			slog.String("request_id", RequestIDFromContext(r.Context())),
 			slog.String("method", r.Method),
+			slog.String("route", route),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", recorder.status),
 			slog.Int("bytes", recorder.bytes),

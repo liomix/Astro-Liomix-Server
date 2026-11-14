@@ -25,7 +25,7 @@ func discardLogger() *slog.Logger {
 func newTestRouter(t *testing.T, maxBody int64) http.Handler {
 	t.Helper()
 
-	svc, err := count.NewService(count.NewMemoryRepository())
+	svc, err := count.NewService(newMemoryRepository())
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -147,7 +147,7 @@ func TestSiteStatsEndpointStartsEmpty(t *testing.T) {
 func TestRegisterRoutesDefaults(t *testing.T) {
 	t.Parallel()
 
-	svc, err := count.NewService(count.NewMemoryRepository())
+	svc, err := count.NewService(newMemoryRepository())
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -184,8 +184,8 @@ func TestSiteStatsEndpointReportsRepositoryFailure(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
 	}
-	if got.Code != "unavailable" {
-		t.Errorf("code = %q, want %q", got.Code, "unavailable")
+	if got.Code != "DEPENDENCY_UNAVAILABLE" {
+		t.Errorf("code = %q, want %q", got.Code, "DEPENDENCY_UNAVAILABLE")
 	}
 }
 
@@ -193,36 +193,46 @@ func TestRecordSiteVisitRejectsBadRequest(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		body      string
-		maxBody   int64
-		wantField string
+		name       string
+		body       string
+		maxBody    int64
+		wantStatus int
+		wantCode   string
+		wantField  string // first field error, empty when the failure has none
 	}{
 		{
-			name:      "malformed json",
-			body:      `{"visitorId":`,
-			wantField: "body",
+			name:       "malformed json",
+			body:       `{"visitorId":`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MALFORMED_REQUEST",
 		},
 		{
-			name:      "unknown field",
-			body:      `{"visitor":"visitor-1"}`,
-			wantField: "body",
+			// Forward compatibility: a field the server does not know yet is
+			// ignored, not rejected. Rejecting it would make "client ships
+			// first, server ships second" impossible to deploy.
+			name:       "unknown field is ignored",
+			body:       `{"visitor":"visitor-1"}`,
+			wantStatus: http.StatusOK,
 		},
 		{
-			name:      "trailing data",
-			body:      `{"visitorId":"a"}{"visitorId":"b"}`,
-			wantField: "body",
+			name:       "trailing data",
+			body:       `{"visitorId":"a"}{"visitorId":"b"}`,
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MALFORMED_REQUEST",
 		},
 		{
-			name:      "visitor id too long",
-			body:      fmt.Sprintf(`{"visitorId":%q}`, strings.Repeat("a", count.MaxVisitorIDLength+1)),
-			wantField: "visitorId",
+			name:       "visitor id too long",
+			body:       fmt.Sprintf(`{"visitorId":%q}`, strings.Repeat("a", count.MaxVisitorIDLength+1)),
+			wantStatus: http.StatusUnprocessableEntity,
+			wantCode:   "VALIDATION_FAILED",
+			wantField:  "visitorId",
 		},
 		{
-			name:      "body too large",
-			body:      fmt.Sprintf(`{"visitorId":%q}`, strings.Repeat("a", 256)),
-			maxBody:   64,
-			wantField: "body",
+			name:       "body too large",
+			body:       fmt.Sprintf(`{"visitorId":%q}`, strings.Repeat("a", 256)),
+			maxBody:    64,
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantCode:   "PAYLOAD_TOO_LARGE",
 		},
 	}
 
@@ -233,22 +243,32 @@ func TestRecordSiteVisitRejectsBadRequest(t *testing.T) {
 			router := newTestRouter(t, tt.maxBody)
 			rec := do(t, router, http.MethodPost, "/api/v1/count/site/visits", tt.body)
 
-			if rec.Code != http.StatusUnprocessableEntity {
-				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+			if rec.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+			if tt.wantStatus == http.StatusOK {
+				return
 			}
 
 			var got struct {
-				Code  string `json:"code"`
-				Field string `json:"field"`
+				Code   string `json:"code"`
+				Errors []struct {
+					Field string `json:"field"`
+				} `json:"errors"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 				t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
 			}
-			if got.Code != "invalid_argument" {
-				t.Errorf("code = %q, want %q", got.Code, "invalid_argument")
+			if got.Code != tt.wantCode {
+				t.Errorf("code = %q, want %q", got.Code, tt.wantCode)
 			}
-			if got.Field != tt.wantField {
-				t.Errorf("field = %q, want %q", got.Field, tt.wantField)
+			switch {
+			case tt.wantField == "" && len(got.Errors) != 0:
+				t.Errorf("errors = %+v, want none: no field is at fault", got.Errors)
+			case tt.wantField != "" && len(got.Errors) == 0:
+				t.Errorf("errors is empty, want a %q entry", tt.wantField)
+			case tt.wantField != "" && got.Errors[0].Field != tt.wantField:
+				t.Errorf("field = %q, want %q", got.Errors[0].Field, tt.wantField)
 			}
 
 			// A rejected visit must not have been counted.
@@ -257,6 +277,41 @@ func TestRecordSiteVisitRejectsBadRequest(t *testing.T) {
 				t.Errorf("views = %d after a rejected visit, want 0", stats.Views)
 			}
 		})
+	}
+}
+
+func TestRecordSiteVisitRejectsNonJSONContentType(t *testing.T) {
+	t.Parallel()
+
+	// The body is valid JSON, so only the declared type can be the reason.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/count/site/visits",
+		strings.NewReader(`{"visitorId":"visitor-1"}`))
+	req.Header.Set("Content-Type", "text/plain")
+
+	rec := httptest.NewRecorder()
+	newTestRouter(t, 0).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnsupportedMediaType, rec.Body.String())
+	}
+}
+
+func TestReadEndpointsStateTheirCaching(t *testing.T) {
+	t.Parallel()
+
+	router := newTestRouter(t, 0)
+
+	read := do(t, router, http.MethodGet, "/api/v1/count/site", "")
+	if got := read.Header().Get("Cache-Control"); got != httpkit.CachePublicRevalidate {
+		t.Errorf("GET Cache-Control = %q, want %q", got, httpkit.CachePublicRevalidate)
+	}
+	if read.Header().Get("ETag") == "" {
+		t.Error("no ETag on a revalidatable read")
+	}
+
+	write := do(t, router, http.MethodPost, "/api/v1/count/site/visits", `{"visitorId":"v1"}`)
+	if got := write.Header().Get("Cache-Control"); got != httpkit.CacheNoStore {
+		t.Errorf("POST Cache-Control = %q, want %q", got, httpkit.CacheNoStore)
 	}
 }
 
@@ -358,11 +413,13 @@ func TestPostViewEndpointsRejectBadRequest(t *testing.T) {
 			wantField: "slug",
 		},
 		{
-			name:      "unknown field",
+			// Unknown fields are ignored; what matters is whether the slug it
+			// does understand is usable.
+			name:      "unknown field is ignored",
 			method:    http.MethodPost,
 			target:    "/api/v1/count/posts/views",
-			body:      `{"postSlug":"hello-astro"}`,
-			wantField: "body",
+			body:      `{"slug":"hello-astro","extra":1}`,
+			wantField: "",
 		},
 		{
 			name:      "batch without slugs",
@@ -391,21 +448,30 @@ func TestPostViewEndpointsRejectBadRequest(t *testing.T) {
 			router := newTestRouter(t, 0)
 			rec := do(t, router, tt.method, tt.target, tt.body)
 
+			if tt.wantField == "" {
+				if rec.Code != http.StatusOK {
+					t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+				}
+				return
+			}
+
 			if rec.Code != http.StatusUnprocessableEntity {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 			}
 			var got struct {
-				Code  string `json:"code"`
-				Field string `json:"field"`
+				Code   string `json:"code"`
+				Errors []struct {
+					Field string `json:"field"`
+				} `json:"errors"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 				t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
 			}
-			if got.Code != "invalid_argument" {
-				t.Errorf("code = %q, want %q", got.Code, "invalid_argument")
+			if got.Code != "VALIDATION_FAILED" {
+				t.Errorf("code = %q, want %q", got.Code, "VALIDATION_FAILED")
 			}
-			if got.Field != tt.wantField {
-				t.Errorf("field = %q, want %q", got.Field, tt.wantField)
+			if len(got.Errors) == 0 || got.Errors[0].Field != tt.wantField {
+				t.Errorf("errors = %+v, want the first field to be %q", got.Errors, tt.wantField)
 			}
 		})
 	}

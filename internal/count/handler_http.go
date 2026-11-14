@@ -66,13 +66,17 @@ func (h *countHandler) recordSiteVisit(w http.ResponseWriter, r *http.Request) {
 }
 
 // siteStats returns the current counters.
+//
+// Cacheable but always revalidated: the numbers move constantly, yet most page
+// loads ask for the same two integers, so an ETag turns the repeat into a 304
+// instead of a full response.
 func (h *countHandler) siteStats(w http.ResponseWriter, r *http.Request) {
 	stats, err := h.svc.SiteStats(r.Context())
 	if err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
-	httpkit.WriteJSON(w, h.logger, http.StatusOK, toSiteStatsPayload(stats))
+	httpkit.WriteJSONCached(w, r, h.logger, http.StatusOK, toSiteStatsPayload(stats), httpkit.CachePublicRevalidate)
 }
 
 // recordPostView counts one read of a post and answers with its new total.
@@ -113,5 +117,5 @@ func (h *countHandler) postViews(w http.ResponseWriter, r *http.Request) {
 	for _, c := range counts {
 		items = append(items, toPostViewsPayload(c))
 	}
-	httpkit.WriteJSON(w, h.logger, http.StatusOK, postViewsResponse{Items: items})
+	httpkit.WriteJSONCached(w, r, h.logger, http.StatusOK, postViewsResponse{Items: items}, httpkit.CachePublicRevalidate)
 }

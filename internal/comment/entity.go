@@ -1,5 +1,5 @@
 // Package comment implements the blog's comment capability end to end:
-// entities and invariants, the comment use cases, an in-memory repository and
+// entities and invariants, the comment use cases, the PostgreSQL repository and
 // the HTTP transport.
 //
 // Everything the module needs from the outside is declared in port.go and
@@ -49,6 +49,10 @@ const (
 	StatusSpam     CommentStatus = "spam"
 )
 
+// statusList is the enumeration written into error messages, kept next to the
+// constants it describes so adding a status cannot leave a stale list behind.
+const statusList = "pending, approved, rejected, spam"
+
 // Valid reports whether s is a known moderation state.
 func (s CommentStatus) Valid() bool {
 	switch s {
@@ -67,28 +71,46 @@ type CommentAuthor struct {
 	Website string
 }
 
-// Validate reports whether the author fields are usable.
+// Validate reports every unusable author field at once.
+//
+// One round trip per field is the difference between a form that can be fixed
+// and a form that has to be resubmitted five times. The HTTP layer has to
+// aggregate anyway; doing it here means the rule holds for every caller.
 func (a CommentAuthor) Validate() error {
-	if err := validateText("author.name", a.Name, MaxNameLength, true); err != nil {
-		return err
+	var problems apperr.ValidationList
+	collect := func(err error) {
+		problems = append(problems, apperr.Fields(err)...)
 	}
-	if a.Email != "" {
-		if len(a.Email) > MaxEmailLength {
-			return &apperr.ValidationError{Field: "author.email", Message: fmt.Sprintf("must be at most %d characters", MaxEmailLength)}
-		}
+
+	collect(validateText("author.name", a.Name, MaxNameLength, true))
+
+	if len(a.Email) > MaxEmailLength {
+		problems = append(problems, &apperr.ValidationError{
+			Field:   "author.email",
+			Code:    apperr.FieldTooLong,
+			Message: fmt.Sprintf("must be at most %d characters", MaxEmailLength),
+		})
+	} else if a.Email != "" {
 		if _, err := mail.ParseAddress(a.Email); err != nil {
-			return &apperr.ValidationError{Field: "author.email", Message: "must be a valid email address"}
+			problems = append(problems, &apperr.ValidationError{
+				Field:   "author.email",
+				Code:    apperr.FieldInvalidFormat,
+				Message: "must be a valid email address",
+			})
 		}
 	}
+
 	if a.Website != "" {
-		if err := validateText("author.website", a.Website, MaxURLLength, false); err != nil {
-			return err
-		}
+		collect(validateText("author.website", a.Website, MaxURLLength, false))
 		if !strings.HasPrefix(a.Website, "http://") && !strings.HasPrefix(a.Website, "https://") {
-			return &apperr.ValidationError{Field: "author.website", Message: "must start with http:// or https://"}
+			problems = append(problems, &apperr.ValidationError{
+				Field:   "author.website",
+				Code:    apperr.FieldInvalidFormat,
+				Message: "must start with http:// or https://",
+			})
 		}
 	}
-	return nil
+	return problems.Err()
 }
 
 // Comment is a single reader response on a blog post.
@@ -106,8 +128,8 @@ type Comment struct {
 	// the comment was created, and the only thing stored: the plaintext is
 	// returned once and kept by the client, never written down here. An empty
 	// value means nobody can delete this comment on its author's behalf —
-	// seed data and comments imported from elsewhere are in that position, and
-	// only the site owner (admin token) can remove them.
+	// comments imported from elsewhere are in that position, and only the site
+	// owner (admin token) can remove them.
 	DeleteTokenHash string
 }
 
@@ -122,22 +144,28 @@ func (c *Comment) Clone() *Comment {
 	return &clone
 }
 
-// Validate reports the first invariant the comment violates. The returned error
-// is always a *apperr.ValidationError, which unwraps to ErrInvalid.
+// Validate reports every invariant the comment violates.
+//
+// The returned error is a *apperr.ValidationError when one thing is wrong and
+// an apperr.ValidationList when several are; both unwrap to ErrInvalid, so
+// callers that only care about the category do not have to know.
 func (c *Comment) Validate() error {
-	if err := ValidatePostSlug(c.PostSlug); err != nil {
-		return err
+	var problems apperr.ValidationList
+	collect := func(err error) {
+		problems = append(problems, apperr.Fields(err)...)
 	}
-	if err := c.Author.Validate(); err != nil {
-		return err
-	}
-	if err := validateBody(c.Body); err != nil {
-		return err
-	}
+
+	collect(ValidatePostSlug(c.PostSlug))
+	collect(c.Author.Validate())
+	collect(validateBody(c.Body))
 	if c.Status != "" && !c.Status.Valid() {
-		return &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
+		problems = append(problems, &apperr.ValidationError{
+			Field:   "status",
+			Code:    apperr.FieldInvalid,
+			Message: "must be one of " + statusList,
+		})
 	}
-	return nil
+	return problems.Err()
 }
 
 // Query narrows a comment listing. Its zero value is valid and means "all
@@ -146,7 +174,15 @@ type Query struct {
 	PostSlug string
 	Status   CommentStatus
 	Limit    int
-	Offset   int
+	// Cursor continues a listing after the row it names. A nil cursor starts at
+	// the newest comment.
+	//
+	// Cursors rather than offsets because the thread is read while people are
+	// commenting on it: with OFFSET, one new comment at the head pushes every
+	// later row down a place and the next page repeats a row it already
+	// returned. A cursor names a row, so inserting above it changes nothing
+	// about what follows it.
+	Cursor *Cursor
 }
 
 // Validate reports whether the query can be executed as written.
@@ -157,13 +193,15 @@ func (q Query) Validate() error {
 		}
 	}
 	if q.Status != "" && !q.Status.Valid() {
-		return &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
+		return &apperr.ValidationError{Field: "status", Code: apperr.FieldInvalid, Message: "must be one of " + statusList}
 	}
 	if q.Limit < 0 {
-		return &apperr.ValidationError{Field: "limit", Message: "must not be negative"}
+		return &apperr.ValidationError{Field: "limit", Code: apperr.FieldOutOfRange, Message: "must not be negative"}
 	}
-	if q.Offset < 0 {
-		return &apperr.ValidationError{Field: "offset", Message: "must not be negative"}
+	if q.Cursor != nil {
+		if err := q.Cursor.validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -190,10 +228,14 @@ type CountQuery struct {
 // Validate reports whether the query can be executed as written.
 func (q CountQuery) Validate() error {
 	if len(q.PostSlugs) == 0 {
-		return &apperr.ValidationError{Field: "slugs", Message: "must name at least one post"}
+		return &apperr.ValidationError{Field: "slugs", Code: apperr.FieldRequired, Message: "must name at least one post"}
 	}
 	if len(q.PostSlugs) > MaxCountSlugs {
-		return &apperr.ValidationError{Field: "slugs", Message: fmt.Sprintf("must not name more than %d posts", MaxCountSlugs)}
+		return &apperr.ValidationError{
+			Field:   "slugs",
+			Code:    apperr.FieldOutOfRange,
+			Message: fmt.Sprintf("must not name more than %d posts", MaxCountSlugs),
+		}
 	}
 	for _, slug := range q.PostSlugs {
 		if err := ValidatePostSlug(slug); err != nil {
@@ -201,7 +243,7 @@ func (q CountQuery) Validate() error {
 		}
 	}
 	if q.Status != "" && !q.Status.Valid() {
-		return &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
+		return &apperr.ValidationError{Field: "status", Code: apperr.FieldInvalid, Message: "must be one of " + statusList}
 	}
 	return nil
 }
@@ -209,17 +251,25 @@ func (q CountQuery) Validate() error {
 // ValidatePostSlug checks a post slug that will be used as a path segment.
 func ValidatePostSlug(slug string) error {
 	if slug == "" {
-		return &apperr.ValidationError{Field: "postSlug", Message: "is required"}
+		return &apperr.ValidationError{Field: "postSlug", Code: apperr.FieldRequired, Message: "is required"}
 	}
 	if len(slug) > MaxSlugLength {
-		return &apperr.ValidationError{Field: "postSlug", Message: fmt.Sprintf("must be at most %d characters", MaxSlugLength)}
+		return &apperr.ValidationError{
+			Field:   "postSlug",
+			Code:    apperr.FieldTooLong,
+			Message: fmt.Sprintf("must be at most %d characters", MaxSlugLength),
+		}
 	}
 	for _, r := range slug {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
 		case r == '-', r == '_', r == '.', r == '/':
 		default:
-			return &apperr.ValidationError{Field: "postSlug", Message: "may only contain letters, digits, '-', '_', '.' and '/'"}
+			return &apperr.ValidationError{
+				Field:   "postSlug",
+				Code:    apperr.FieldInvalidFormat,
+				Message: "may only contain letters, digits, '-', '_', '.' and '/'",
+			}
 		}
 	}
 	return nil
@@ -239,10 +289,14 @@ func validateBody(body string) error {
 	// stored value with NormalizeBody.
 	trimmed := strings.TrimSpace(body)
 	if trimmed == "" {
-		return &apperr.ValidationError{Field: "body", Message: "is required"}
+		return &apperr.ValidationError{Field: "body", Code: apperr.FieldRequired, Message: "is required"}
 	}
 	if utf8.RuneCountInString(trimmed) > MaxBodyLength {
-		return &apperr.ValidationError{Field: "body", Message: fmt.Sprintf("must be at most %d characters", MaxBodyLength)}
+		return &apperr.ValidationError{
+			Field:   "body",
+			Code:    apperr.FieldTooLong,
+			Message: fmt.Sprintf("must be at most %d characters", MaxBodyLength),
+		}
 	}
 	for _, r := range trimmed {
 		// Allow the whitespace a comment legitimately needs, reject the rest of
@@ -251,7 +305,11 @@ func validateBody(body string) error {
 			continue
 		}
 		if unicode.IsControl(r) {
-			return &apperr.ValidationError{Field: "body", Message: "must not contain control characters"}
+			return &apperr.ValidationError{
+				Field:   "body",
+				Code:    apperr.FieldInvalidFormat,
+				Message: "must not contain control characters",
+			}
 		}
 	}
 	return nil
@@ -260,16 +318,24 @@ func validateBody(body string) error {
 func validateText(field, value string, maxLen int, required bool) error {
 	if value == "" {
 		if required {
-			return &apperr.ValidationError{Field: field, Message: "is required"}
+			return &apperr.ValidationError{Field: field, Code: apperr.FieldRequired, Message: "is required"}
 		}
 		return nil
 	}
 	if utf8.RuneCountInString(value) > maxLen {
-		return &apperr.ValidationError{Field: field, Message: fmt.Sprintf("must be at most %d characters", maxLen)}
+		return &apperr.ValidationError{
+			Field:   field,
+			Code:    apperr.FieldTooLong,
+			Message: fmt.Sprintf("must be at most %d characters", maxLen),
+		}
 	}
 	for _, r := range value {
 		if unicode.IsControl(r) {
-			return &apperr.ValidationError{Field: field, Message: "must not contain control characters"}
+			return &apperr.ValidationError{
+				Field:   field,
+				Code:    apperr.FieldInvalidFormat,
+				Message: "must not contain control characters",
+			}
 		}
 	}
 	return nil

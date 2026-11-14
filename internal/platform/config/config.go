@@ -25,24 +25,30 @@ const (
 // is what a `openssl rand -hex 16`-style secret comfortably exceeds.
 const minAdminTokenLength = 16
 
-// demoSeedFile is what a development run loads when COMMENT_SEED_FILE is blank.
-// Storage is in-memory, so every restart starts empty; without a default a
-// newcomer opens the comment section, sees "no comments yet" and concludes the
-// feature was never wired up. COMMENT_SEED_FILE=off turns seeding off.
-const demoSeedFile = "configs/seed/demo-comments.json"
-
-// seedFileDisabled is the sentinel that opts out of the development default.
-// An empty value cannot carry that meaning: `COMMENT_SEED_FILE=` is how .env
-// files spell "not set", so treating it as opt-out would silently disable the
-// demo data for anyone who copies configs/.env.example.
-const seedFileDisabled = "off"
+// devDatabaseURL is where a development run connects when DATABASE_URL is
+// blank. The password is deliberately absent: pgx resolves it from
+// %APPDATA%\postgresql\pgpass.conf (or ~/.pgpass) exactly like psql does, so
+// credentials never enter the repository. Other environments must name the URL
+// themselves rather than silently inheriting a localhost default.
+const devDatabaseURL = "postgres://postgres@localhost:5432/Blog?sslmode=disable"
 
 // Config is the fully resolved configuration of the server.
 type Config struct {
-	Env     string
-	HTTP    HTTP
-	Comment Comment
-	Admin   Admin
+	Env      string
+	HTTP     HTTP
+	Database Database
+	Comment  Comment
+	Admin    Admin
+}
+
+// Database holds the PostgreSQL settings.
+type Database struct {
+	// URL is the connection string handed to the driver. Development falls
+	// back to devDatabaseURL; every other environment has to set it.
+	URL             string
+	MaxOpenConns    int
+	MaxIdleConns    int
+	ConnMaxLifetime time.Duration
 }
 
 // Admin holds the credentials of the single privileged operator.
@@ -72,11 +78,6 @@ type HTTP struct {
 type Comment struct {
 	DefaultPageSize int
 	MaxPageSize     int
-	// SeedFile is a demo fixture loaded at startup. When blank it defaults to
-	// demoSeedFile in development, so a bare `go run ./cmd/server` has something
-	// to show; "off" turns seeding off. Setting it in production is refused,
-	// because those comments bypass moderation and live in memory only.
-	SeedFile string
 }
 
 // Load reads the environment and returns a validated configuration. All
@@ -100,6 +101,11 @@ func Load() (*Config, error) {
 			DefaultPageSize: 20,
 			MaxPageSize:     100,
 		},
+		Database: Database{
+			MaxOpenConns:    10,
+			MaxIdleConns:    5,
+			ConnMaxLifetime: 30 * time.Minute,
+		},
 	}
 
 	var errs []error
@@ -115,8 +121,17 @@ func Load() (*Config, error) {
 	loadStringList("HTTP_CORS_ORIGINS", &cfg.HTTP.CORSOrigins, &errs)
 	loadInt("COMMENT_DEFAULT_PAGE_SIZE", &cfg.Comment.DefaultPageSize, &errs)
 	loadInt("COMMENT_MAX_PAGE_SIZE", &cfg.Comment.MaxPageSize, &errs)
-	seed, _ := os.LookupEnv("COMMENT_SEED_FILE")
-	cfg.Comment.SeedFile = pickSeedFile(cfg.Env, seed, fileExists(demoSeedFile))
+
+	// The URL is read directly rather than through envString so that "blank"
+	// stays distinguishable: a blank URL in development means "use the local
+	// default", while anywhere else it means "not configured" and must fail.
+	cfg.Database.URL = strings.TrimSpace(os.Getenv("DATABASE_URL"))
+	if cfg.Database.URL == "" && cfg.Env == EnvDevelopment {
+		cfg.Database.URL = devDatabaseURL
+	}
+	loadInt("DATABASE_MAX_OPEN_CONNS", &cfg.Database.MaxOpenConns, &errs)
+	loadInt("DATABASE_MAX_IDLE_CONNS", &cfg.Database.MaxIdleConns, &errs)
+	loadDuration("DATABASE_CONN_MAX_LIFETIME", &cfg.Database.ConnMaxLifetime, &errs)
 
 	if token, ok := os.LookupEnv("ADMIN_TOKEN"); ok {
 		cfg.Admin.Token = strings.TrimSpace(token)
@@ -180,39 +195,21 @@ func (c *Config) validate() error {
 	if c.Comment.MaxPageSize < c.Comment.DefaultPageSize {
 		errs = append(errs, errors.New("COMMENT_MAX_PAGE_SIZE must be greater than or equal to COMMENT_DEFAULT_PAGE_SIZE"))
 	}
-	// Demo seeding writes unmoderated comments into a store that will not even
-	// survive a restart, so a production deployment that sets it by accident
-	// would get fake reader voices for as long as the process lives.
-	if c.Comment.SeedFile != "" && c.Env == EnvProduction {
-		errs = append(errs, errors.New("COMMENT_SEED_FILE must be empty in production"))
+	if strings.TrimSpace(c.Database.URL) == "" {
+		errs = append(errs, errors.New("DATABASE_URL is required outside development"))
+	}
+	if c.Database.MaxOpenConns <= 0 {
+		errs = append(errs, errors.New("DATABASE_MAX_OPEN_CONNS must be positive"))
+	}
+	// More idle connections than the pool is allowed to open is a
+	// configuration that silently does nothing, so refuse it.
+	if c.Database.MaxIdleConns < 0 || c.Database.MaxIdleConns > c.Database.MaxOpenConns {
+		errs = append(errs, errors.New("DATABASE_MAX_IDLE_CONNS must be between 0 and DATABASE_MAX_OPEN_CONNS"))
+	}
+	if c.Database.ConnMaxLifetime <= 0 {
+		errs = append(errs, errors.New("DATABASE_CONN_MAX_LIFETIME must be positive"))
 	}
 	return errors.Join(errs...)
-}
-
-// pickSeedFile resolves which fixture a run loads. A named file always wins;
-// "off" and any non-development environment yield no seeding at all.
-//
-// The demo default is development-only: staging and production must not pick up
-// fake reader voices by accident, and validate() still rejects the file for
-// production even when it is named explicitly.
-func pickSeedFile(env, raw string, demoExists bool) string {
-	if named := strings.TrimSpace(raw); named != "" {
-		if strings.EqualFold(named, seedFileDisabled) {
-			return ""
-		}
-		return named
-	}
-	if env == EnvDevelopment && demoExists {
-		return demoSeedFile
-	}
-	return ""
-}
-
-// fileExists reports whether path is a regular file. A missing fixture is not
-// an error — it only means the demo default does not apply.
-func fileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular()
 }
 
 func envString(key, fallback string) string {

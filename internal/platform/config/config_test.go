@@ -26,7 +26,10 @@ func clearEnv(t *testing.T) {
 		"ADMIN_TOKEN",
 		"COMMENT_DEFAULT_PAGE_SIZE",
 		"COMMENT_MAX_PAGE_SIZE",
-		"COMMENT_SEED_FILE",
+		"DATABASE_URL",
+		"DATABASE_MAX_OPEN_CONNS",
+		"DATABASE_MAX_IDLE_CONNS",
+		"DATABASE_CONN_MAX_LIFETIME",
 	} {
 		t.Setenv(key, "")
 	}
@@ -76,6 +79,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv("COMMENT_MAX_PAGE_SIZE", "50")
 	t.Setenv("HTTP_CORS_ORIGINS", "https://blog.example.com, http://localhost:2077 ")
 	t.Setenv("ADMIN_TOKEN", "  admin-token-for-tests  ")
+	t.Setenv("DATABASE_URL", "postgres://blog@db.internal:5432/Blog?sslmode=disable")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -127,6 +131,8 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 		{name: "origin with trailing slash", key: "HTTP_CORS_ORIGINS", value: "https://blog.example.com/", wantSub: "HTTP_CORS_ORIGINS"},
 		{name: "list of blanks", key: "HTTP_CORS_ORIGINS", value: " , ,", wantSub: "HTTP_CORS_ORIGINS"},
 		{name: "short admin token", key: "ADMIN_TOKEN", value: "too-short", wantSub: "ADMIN_TOKEN"},
+		{name: "zero max open conns", key: "DATABASE_MAX_OPEN_CONNS", value: "0", wantSub: "DATABASE_MAX_OPEN_CONNS"},
+		{name: "bad conn lifetime", key: "DATABASE_CONN_MAX_LIFETIME", value: "forever", wantSub: "DATABASE_CONN_MAX_LIFETIME"},
 	}
 
 	for _, tt := range tests {
@@ -145,77 +151,83 @@ func TestLoadRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-// Demo seeding is a development affordance: production refuses the switch
-// outright rather than serving fixture comments as real reader voices.
-func TestLoadSeedFile(t *testing.T) {
+// Development falls back to the local Blog database, so a bare
+// `go run ./cmd/server` reaches something. The password is absent on purpose:
+// pgx resolves it from pgpass, which keeps credentials out of the repository.
+func TestLoadDatabaseDefaults(t *testing.T) {
 	clearEnv(t)
-	t.Setenv("COMMENT_SEED_FILE", "  configs/seed/demo-comments.json  ")
 
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if want := "configs/seed/demo-comments.json"; cfg.Comment.SeedFile != want {
-		t.Errorf("Comment.SeedFile = %q, want %q (trimmed)", cfg.Comment.SeedFile, want)
+	if want := "postgres://postgres@localhost:5432/Blog?sslmode=disable"; cfg.Database.URL != want {
+		t.Errorf("Database.URL = %q, want %q", cfg.Database.URL, want)
 	}
-
-	t.Setenv("APP_ENV", config.EnvProduction)
-	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "COMMENT_SEED_FILE") {
-		t.Fatalf("Load() error = %v, want a COMMENT_SEED_FILE complaint", err)
+	if cfg.Database.MaxOpenConns != 10 || cfg.Database.MaxIdleConns != 5 {
+		t.Errorf("pool = (%d open, %d idle), want (10, 5)",
+			cfg.Database.MaxOpenConns, cfg.Database.MaxIdleConns)
+	}
+	if cfg.Database.ConnMaxLifetime != 30*time.Minute {
+		t.Errorf("ConnMaxLifetime = %v, want 30m", cfg.Database.ConnMaxLifetime)
 	}
 }
 
-// A bare `go run ./cmd/server` in development must come up with demo comments.
-// Storage is in-memory and empty on every restart, so the alternative is a
-// comment section that looks like the feature was never wired up.
-func TestLoadSeedFileDefaultsToDemoInDevelopment(t *testing.T) {
-	clearEnv(t)
-	// The fixture path is relative to the repository root, which is where the
-	// binary is normally started from.
-	t.Chdir("../../..")
-
-	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if want := "configs/seed/demo-comments.json"; cfg.Comment.SeedFile != want {
-		t.Errorf("Comment.SeedFile = %q, want the demo fixture %q", cfg.Comment.SeedFile, want)
-	}
-
-	// Other environments never pick the fixture up on their own.
+// Every other environment has to name the database: quietly inheriting a
+// localhost default would point production at a machine that has no data.
+func TestLoadRequiresDatabaseOutsideDevelopment(t *testing.T) {
 	for _, env := range []string{config.EnvStaging, config.EnvProduction} {
-		t.Setenv("APP_ENV", env)
-		cfg, err := config.Load()
-		if err != nil {
-			t.Fatalf("Load() in %s error = %v", env, err)
-		}
-		if cfg.Comment.SeedFile != "" {
-			t.Errorf("Comment.SeedFile in %s = %q, want empty", env, cfg.Comment.SeedFile)
-		}
+		t.Run(env, func(t *testing.T) {
+			clearEnv(t)
+			t.Setenv("APP_ENV", env)
+
+			if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+				t.Fatalf("Load() error = %v, want a DATABASE_URL complaint", err)
+			}
+
+			t.Setenv("DATABASE_URL", "postgres://blog@db.internal:5432/Blog")
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if want := "postgres://blog@db.internal:5432/Blog"; cfg.Database.URL != want {
+				t.Errorf("Database.URL = %q, want %q", cfg.Database.URL, want)
+			}
+		})
 	}
 }
 
-// A blank value is how .env files spell "not set" — configs/.env.example ships
-// `COMMENT_SEED_FILE=` — so it must fall back to the demo default instead of
-// quietly turning seeding off. "off" is the explicit opt-out.
-func TestLoadSeedFileBlankFallsBackAndOffOptsOut(t *testing.T) {
+func TestLoadDatabaseOverrides(t *testing.T) {
 	clearEnv(t)
-	t.Chdir("../../..")
+	t.Setenv("DATABASE_URL", "postgres://blog:secret@db:5432/blog?sslmode=require")
+	t.Setenv("DATABASE_MAX_OPEN_CONNS", "25")
+	t.Setenv("DATABASE_MAX_IDLE_CONNS", "0")
+	t.Setenv("DATABASE_CONN_MAX_LIFETIME", "1h")
 
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if want := "configs/seed/demo-comments.json"; cfg.Comment.SeedFile != want {
-		t.Errorf("blank COMMENT_SEED_FILE gave %q, want the demo fixture %q", cfg.Comment.SeedFile, want)
+	if want := "postgres://blog:secret@db:5432/blog?sslmode=require"; cfg.Database.URL != want {
+		t.Errorf("Database.URL = %q, want %q", cfg.Database.URL, want)
 	}
+	if cfg.Database.MaxOpenConns != 25 || cfg.Database.MaxIdleConns != 0 {
+		t.Errorf("pool = (%d open, %d idle), want (25, 0)",
+			cfg.Database.MaxOpenConns, cfg.Database.MaxIdleConns)
+	}
+	if cfg.Database.ConnMaxLifetime != time.Hour {
+		t.Errorf("ConnMaxLifetime = %v, want 1h", cfg.Database.ConnMaxLifetime)
+	}
+}
 
-	t.Setenv("COMMENT_SEED_FILE", "off")
-	cfg, err = config.Load()
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-	if cfg.Comment.SeedFile != "" {
-		t.Errorf("Comment.SeedFile = %q, want empty for an explicit opt-out", cfg.Comment.SeedFile)
+// An idle cap above the open cap is silently meaningless, so it is rejected
+// instead of being clamped without telling anyone.
+func TestLoadRejectsIdleAboveOpen(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("DATABASE_MAX_OPEN_CONNS", "5")
+	t.Setenv("DATABASE_MAX_IDLE_CONNS", "6")
+
+	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "DATABASE_MAX_IDLE_CONNS") {
+		t.Fatalf("Load() error = %v, want a DATABASE_MAX_IDLE_CONNS complaint", err)
 	}
 }

@@ -18,6 +18,37 @@ func discardLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
+// problemBody mirrors the RFC 9457 document every failure returns.
+type problemBody struct {
+	Title    string `json:"title"`
+	Status   int    `json:"status"`
+	Code     string `json:"code"`
+	Detail   string `json:"detail"`
+	Instance string `json:"instance"`
+	TraceID  string `json:"traceId"`
+	Errors   []struct {
+		Field   string `json:"field"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"errors"`
+}
+
+func decodeProblem(t *testing.T, rec *httptest.ResponseRecorder) problemBody {
+	t.Helper()
+
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/problem+json") {
+		t.Errorf("Content-Type = %q, want application/problem+json", ct)
+	}
+	var body problemBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode problem body %q: %v", rec.Body.String(), err)
+	}
+	if body.TraceID == "" {
+		t.Error("traceId is empty; nobody can find the log line for this failure")
+	}
+	return body
+}
+
 // testAdminToken is long enough to satisfy the server-side minimum length.
 const testAdminToken = "test-admin-token-0123456789"
 
@@ -29,7 +60,7 @@ func newTestRouter(t *testing.T, maxBody int64) http.Handler {
 func newTestRouterWithToken(t *testing.T, maxBody int64, adminToken string) http.Handler {
 	t.Helper()
 
-	svc, err := comment.NewService(comment.NewMemoryRepository(), comment.WithLogger(discardLogger()))
+	svc, err := comment.NewService(newMemoryRepository(), comment.WithLogger(discardLogger()))
 	if err != nil {
 		t.Fatalf("NewService() error = %v", err)
 	}
@@ -140,30 +171,29 @@ func TestCreateCommentRejectsBadRequests(t *testing.T) {
 		maxBody    int64
 		wantStatus int
 		wantCode   string
-		wantField  string
+		wantField  string // first field error, empty when no field is at fault
 	}{
 		{
-			name:       "unknown field",
+			// Forward compatibility: an unrecognised body field is ignored.
+			// Rejecting it would make "client ships first" impossible.
+			name:       "unknown field is ignored",
 			path:       "/api/v1/posts/hello/comments",
 			body:       `{"body":"hi","author":{"name":"Ada"},"admin":true}`,
-			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "invalid_argument",
-			wantField:  "body",
+			wantStatus: http.StatusCreated,
 		},
 		{
 			name:       "malformed JSON",
 			path:       "/api/v1/posts/hello/comments",
 			body:       `{"body":`,
-			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "invalid_argument",
-			wantField:  "body",
+			wantStatus: http.StatusBadRequest,
+			wantCode:   "MALFORMED_REQUEST",
 		},
 		{
 			name:       "empty body field",
 			path:       "/api/v1/posts/hello/comments",
 			body:       `{"author":{"name":"Ada"},"body":"   "}`,
 			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "invalid_argument",
+			wantCode:   "VALIDATION_FAILED",
 			wantField:  "body",
 		},
 		{
@@ -171,7 +201,7 @@ func TestCreateCommentRejectsBadRequests(t *testing.T) {
 			path:       "/api/v1/posts/hello/comments",
 			body:       `{"author":{"name":""},"body":"hi"}`,
 			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "invalid_argument",
+			wantCode:   "VALIDATION_FAILED",
 			wantField:  "author.name",
 		},
 		{
@@ -179,7 +209,7 @@ func TestCreateCommentRejectsBadRequests(t *testing.T) {
 			path:       "/api/v1/posts/hello%20world/comments",
 			body:       createBody("Ada", "hi"),
 			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "invalid_argument",
+			wantCode:   "VALIDATION_FAILED",
 			wantField:  "postSlug",
 		},
 		{
@@ -187,9 +217,8 @@ func TestCreateCommentRejectsBadRequests(t *testing.T) {
 			path:       "/api/v1/posts/hello/comments",
 			body:       createBody("Ada", strings.Repeat("x", 200)),
 			maxBody:    64,
-			wantStatus: http.StatusUnprocessableEntity,
-			wantCode:   "invalid_argument",
-			wantField:  "body",
+			wantStatus: http.StatusRequestEntityTooLarge,
+			wantCode:   "PAYLOAD_TOO_LARGE",
 		},
 	}
 
@@ -203,21 +232,49 @@ func TestCreateCommentRejectsBadRequests(t *testing.T) {
 			if rec.Code != tt.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", rec.Code, tt.wantStatus, rec.Body.String())
 			}
+			if tt.wantStatus == http.StatusCreated {
+				return
+			}
 
-			var body struct {
-				Code  string `json:"code"`
-				Field string `json:"field"`
+			problem := decodeProblem(t, rec)
+			if problem.Code != tt.wantCode {
+				t.Errorf("code = %q, want %q", problem.Code, tt.wantCode)
 			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-				t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
-			}
-			if body.Code != tt.wantCode {
-				t.Errorf("code = %q, want %q", body.Code, tt.wantCode)
-			}
-			if body.Field != tt.wantField {
-				t.Errorf("field = %q, want %q", body.Field, tt.wantField)
+			switch {
+			case tt.wantField == "" && len(problem.Errors) != 0:
+				t.Errorf("errors = %+v, want none: no field is at fault", problem.Errors)
+			case tt.wantField != "" && len(problem.Errors) == 0:
+				t.Errorf("errors is empty, want a %q entry", tt.wantField)
+			case tt.wantField != "" && problem.Errors[0].Field != tt.wantField:
+				t.Errorf("field = %q, want %q", problem.Errors[0].Field, tt.wantField)
 			}
 		})
+	}
+}
+
+// TestCreateCommentReportsEveryBadField pins the reason the error model carries
+// a list: a form should be fixable in one submission, not one field per try.
+func TestCreateCommentReportsEveryBadField(t *testing.T) {
+	t.Parallel()
+
+	rec := do(t, newTestRouter(t, 0), http.MethodPost, "/api/v1/posts/hello/comments",
+		`{"author":{"name":"","email":"not-an-email"},"body":""}`)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+
+	problem := decodeProblem(t, rec)
+	got := make(map[string]bool, len(problem.Errors))
+	for _, field := range problem.Errors {
+		got[field.Field] = true
+		if field.Code == "" {
+			t.Errorf("field %q has no code; the client can only localise by code", field.Field)
+		}
+	}
+	for _, want := range []string{"author.name", "author.email", "body"} {
+		if !got[want] {
+			t.Errorf("errors = %+v, want an entry for %q", problem.Errors, want)
+		}
 	}
 }
 
@@ -257,14 +314,8 @@ func TestGetComment(t *testing.T) {
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want %d", missing.Code, http.StatusNotFound)
 	}
-	var body struct {
-		Code string `json:"code"`
-	}
-	if err := json.Unmarshal(missing.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error body: %v", err)
-	}
-	if body.Code != "not_found" {
-		t.Errorf("code = %q, want %q", body.Code, "not_found")
+	if body := decodeProblem(t, missing); body.Code != "RESOURCE_NOT_FOUND" {
+		t.Errorf("code = %q, want %q", body.Code, "RESOURCE_NOT_FOUND")
 	}
 }
 
@@ -305,7 +356,7 @@ func TestUpdateCommentStatusRejectsBadInput(t *testing.T) {
 	}{
 		{name: "unknown status", target: "/api/v1/comments/" + created.ID + "/status", body: `{"status":"maybe"}`, wantCode: http.StatusUnprocessableEntity, wantField: "status"},
 		{name: "empty status", target: "/api/v1/comments/" + created.ID + "/status", body: `{}`, wantCode: http.StatusUnprocessableEntity, wantField: "status"},
-		{name: "unknown field", target: "/api/v1/comments/" + created.ID + "/status", body: `{"state":"approved"}`, wantCode: http.StatusUnprocessableEntity, wantField: "body"},
+		{name: "unknown field leaves the status empty", target: "/api/v1/comments/" + created.ID + "/status", body: `{"state":"approved"}`, wantCode: http.StatusUnprocessableEntity, wantField: "status"},
 		{name: "missing comment", target: "/api/v1/comments/unknown/status", body: `{"status":"approved"}`, wantCode: http.StatusNotFound},
 	}
 
@@ -320,14 +371,9 @@ func TestUpdateCommentStatusRejectsBadInput(t *testing.T) {
 			if tt.wantField == "" {
 				return
 			}
-			var body struct {
-				Field string `json:"field"`
-			}
-			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-				t.Fatalf("decode error body %q: %v", rec.Body.String(), err)
-			}
-			if body.Field != tt.wantField {
-				t.Errorf("field = %q, want %q", body.Field, tt.wantField)
+			body := decodeProblem(t, rec)
+			if len(body.Errors) == 0 || body.Errors[0].Field != tt.wantField {
+				t.Errorf("errors = %+v, want the first field to be %q", body.Errors, tt.wantField)
 			}
 		})
 	}
@@ -433,15 +479,12 @@ func TestModerationRoutesNeedTheAdminToken(t *testing.T) {
 
 type listResponse struct {
 	Items []struct {
-		ID     string `json:"id"`
-		Body   string `json:"body"`
-		Status string `json:"status"`
+		ID       string  `json:"id"`
+		Body     string  `json:"body"`
+		Status   string  `json:"status"`
+		ParentID *string `json:"parentId"`
 	} `json:"items"`
-	Pagination struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
-		Count  int `json:"count"`
-	} `json:"pagination"`
+	NextCursor *string `json:"nextCursor"`
 }
 
 func decodeList(t *testing.T, rec *httptest.ResponseRecorder) listResponse {
@@ -457,7 +500,7 @@ func decodeList(t *testing.T, rec *httptest.ResponseRecorder) listResponse {
 func TestListComments(t *testing.T) {
 	t.Parallel()
 
-	router := newTestRouter(t, 0)
+	router := newTestRouterWithToken(t, 0, testAdminToken)
 	for _, body := range []string{"first", "second"} {
 		rec := do(t, router, http.MethodPost, "/api/v1/posts/hello/comments", createBody("Ada", body))
 		if rec.Code != http.StatusCreated {
@@ -468,45 +511,129 @@ func TestListComments(t *testing.T) {
 	t.Run("pending comments are not public", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeList(t, do(t, router, http.MethodGet, "/api/v1/posts/hello/comments", ""))
-		if got.Pagination.Count != 0 {
-			t.Errorf("count = %d, want 0 while comments await moderation", got.Pagination.Count)
+		rec := do(t, router, http.MethodGet, "/api/v1/posts/hello/comments", "")
+		got := decodeList(t, rec)
+		if len(got.Items) != 0 {
+			t.Errorf("items = %+v, want none while comments await moderation", got.Items)
 		}
 		if got.Items == nil {
 			t.Error("items = null, want an empty array")
 		}
-	})
-
-	t.Run("explicit status filter", func(t *testing.T) {
-		t.Parallel()
-
-		got := decodeList(t, do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?status=pending", ""))
-		if got.Pagination.Count != 2 {
-			t.Fatalf("count = %d, want 2", got.Pagination.Count)
-		}
-		if got.Items[0].Body != "second" {
-			t.Errorf("first item = %q, want newest comment %q", got.Items[0].Body, "second")
+		// The public listing is safe to cache: it only ever holds approved
+		// comments, and the ETag makes the revalidation cheap.
+		if cc := rec.Header().Get("Cache-Control"); cc != httpkit.CachePublicRevalidate {
+			t.Errorf("Cache-Control = %q, want %q", cc, httpkit.CachePublicRevalidate)
 		}
 	})
 
-	t.Run("pagination", func(t *testing.T) {
+	t.Run("unapproved listings need a credential", func(t *testing.T) {
 		t.Parallel()
 
-		got := decodeList(t, do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?status=all&limit=1&offset=1", ""))
-		if got.Pagination.Limit != 1 || got.Pagination.Offset != 1 {
-			t.Errorf("pagination = (%d, %d), want (1, 1)", got.Pagination.Limit, got.Pagination.Offset)
+		// Reading the queue is the moderator's job. Silently answering with an
+		// empty list would be worse: the caller would think there is nothing to
+		// review.
+		rec := do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?status=pending", "")
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnauthorized, rec.Body.String())
 		}
-		if got.Pagination.Count != 1 || got.Items[0].Body != "first" {
-			t.Errorf("page items = %+v, want the older comment", got.Items)
+		if got := rec.Header().Get("WWW-Authenticate"); !strings.HasPrefix(got, "Bearer") {
+			t.Errorf("WWW-Authenticate = %q, want a Bearer challenge", got)
+		}
+	})
+
+	t.Run("moderator sees the queue uncached", func(t *testing.T) {
+		t.Parallel()
+
+		rec := doWithToken(t, router, http.MethodGet, "/api/v1/posts/hello/comments?status=pending", "", testAdminToken)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		got := decodeList(t, rec)
+		if len(got.Items) != 2 {
+			t.Fatalf("items = %+v, want the two pending comments", got.Items)
+		}
+		// Order between two comments written in the same instant is decided by
+		// the id tie-breaker, so the assertion is about what the queue holds.
+		bodies := map[string]bool{}
+		for _, item := range got.Items {
+			bodies[item.Body] = true
+		}
+		if !bodies["first"] || !bodies["second"] {
+			t.Errorf("items = %+v, want both pending comments", got.Items)
+		}
+		// A response produced for a credential must never reach a shared cache.
+		if cc := rec.Header().Get("Cache-Control"); cc != httpkit.CacheNoStore {
+			t.Errorf("Cache-Control = %q, want %q", cc, httpkit.CacheNoStore)
+		}
+	})
+
+	t.Run("cursor walks the thread without repeating", func(t *testing.T) {
+		t.Parallel()
+
+		first := decodeList(t, doWithToken(t, router, http.MethodGet,
+			"/api/v1/posts/hello/comments?status=all&limit=1", "", testAdminToken))
+		if len(first.Items) != 1 {
+			t.Fatalf("page 1 = %+v, want exactly one item", first.Items)
+		}
+		if first.NextCursor == nil {
+			t.Fatal("nextCursor = null on a page that is not the last one")
+		}
+
+		second := decodeList(t, doWithToken(t, router, http.MethodGet,
+			"/api/v1/posts/hello/comments?status=all&limit=1&cursor="+*first.NextCursor, "", testAdminToken))
+		if len(second.Items) != 1 {
+			t.Fatalf("page 2 = %+v, want exactly one item", second.Items)
+		}
+		if second.NextCursor != nil {
+			t.Errorf("nextCursor = %q on the last page, want null", *second.NextCursor)
+		}
+
+		// The property that matters is that walking the cursor sees every
+		// comment exactly once. An offset-based listing fails this the moment a
+		// comment is inserted above the cursor between two requests.
+		seen := map[string]int{}
+		for _, item := range append(first.Items, second.Items...) {
+			seen[item.Body]++
+		}
+		for _, want := range []string{"first", "second"} {
+			if seen[want] != 1 {
+				t.Errorf("body %q appeared %d times across two pages, want exactly once", want, seen[want])
+			}
+		}
+	})
+
+	t.Run("root comments report a null parent", func(t *testing.T) {
+		t.Parallel()
+
+		got := decodeList(t, doWithToken(t, router, http.MethodGet,
+			"/api/v1/posts/hello/comments?status=all&limit=1", "", testAdminToken))
+		if got.Items[0].ParentID != nil {
+			t.Errorf("parentId = %q, want null for a top-level comment", *got.Items[0].ParentID)
+		}
+	})
+
+	t.Run("invalid cursor", func(t *testing.T) {
+		t.Parallel()
+
+		// A cursor this API never issued cannot be a validation failure: there
+		// is no field the client can correct, only a token to drop.
+		rec := do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?cursor=not-a-cursor", "")
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusBadRequest, rec.Body.String())
+		}
+		if body := decodeProblem(t, rec); body.Code != "MALFORMED_REQUEST" {
+			t.Errorf("code = %q, want %q", body.Code, "MALFORMED_REQUEST")
 		}
 	})
 
 	t.Run("invalid query", func(t *testing.T) {
 		t.Parallel()
 
-		rec := do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?limit=abc", "")
-		if rec.Code != http.StatusUnprocessableEntity {
+		if rec := do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?limit=abc", ""); rec.Code != http.StatusUnprocessableEntity {
 			t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
+		}
+		if rec := do(t, router, http.MethodGet, "/api/v1/posts/hello/comments?status=archived", ""); rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("unknown status = %d, want %d", rec.Code, http.StatusUnprocessableEntity)
 		}
 	})
 }
@@ -585,15 +712,9 @@ func TestCountCommentsIsNotTreatedAsCommentID(t *testing.T) {
 		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 	}
 
-	var body struct {
-		Code  string `json:"code"`
-		Field string `json:"field"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode error response %q: %v", rec.Body.String(), err)
-	}
-	if body.Field != "slugs" {
-		t.Errorf("field = %q, want %q", body.Field, "slugs")
+	body := decodeProblem(t, rec)
+	if len(body.Errors) == 0 || body.Errors[0].Field != "slugs" {
+		t.Errorf("errors = %+v, want a slugs entry", body.Errors)
 	}
 }
 
