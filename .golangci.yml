@@ -1,0 +1,34 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - errorlint
+    - misspell
+    - noctx
+    - revive
+    - unconvert
+    - unparam
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable:
+        - shadow
+  exclusions:
+    rules:
+      # Tests intentionally use shortcuts that production code must not.
+      - path: _test\.go
+        linters:
+          - errcheck
+          - noctx
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

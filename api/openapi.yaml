@@ -1,0 +1,247 @@
+openapi: 3.1.0
+info:
+  title: Astro Liomix Blog API
+  version: 0.1.0
+  description: >
+    Comment API for the blog. New comments enter moderation and are not part of
+    the public listing until approved. The storage adapter is in-memory for now;
+    the HTTP contract is stable.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: comments
+  - name: health
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      operationId: getHealth
+      responses:
+        "200":
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+
+  /api/v1/posts/{slug}/comments:
+    parameters:
+      - name: slug
+        in: path
+        required: true
+        description: Post slug, e.g. `hello-astro` or `notes/2026/hello`.
+        schema:
+          type: string
+          maxLength: 200
+          pattern: "^[A-Za-z0-9._/-]+$"
+    get:
+      tags: [comments]
+      summary: List comments of a post
+      operationId: listComments
+      description: >
+        Returns comments newest first. Only approved comments are returned
+        unless another status (or `all`) is requested, so comments awaiting
+        moderation never leak publicly.
+      parameters:
+        - name: status
+          in: query
+          description: Moderation filter. Defaults to `approved`.
+          schema:
+            type: string
+            enum: [approved, pending, rejected, spam, all]
+        - name: limit
+          in: query
+          description: Page size. Clamped to the server maximum (100 by default).
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: A page of comments
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CommentList"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+    post:
+      tags: [comments]
+      summary: Publish a comment
+      operationId: createComment
+      description: >
+        Validates and stores a comment. The response carries the moderation
+        status, which is `pending` by default, so a 201 does not mean the
+        comment is publicly visible.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateCommentRequest"
+      responses:
+        "201":
+          description: Comment stored
+          headers:
+            Location:
+              description: URL of the created comment.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+
+  /api/v1/comments/{id}:
+    get:
+      tags: [comments]
+      summary: Get a comment
+      operationId: getComment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The comment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Comment"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+components:
+  responses:
+    InvalidInput:
+      description: The request failed validation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No resource matches the request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          examples: [invalid_argument, not_found, conflict, internal]
+        message:
+          type: string
+        field:
+          type: string
+          description: Offending field, present for validation failures.
+        requestId:
+          type: string
+          description: Correlation ID, also returned in the X-Request-Id header.
+
+    CommentAuthorInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 80
+        email:
+          type: string
+          maxLength: 254
+          description: Never returned by the API; used for moderation and notifications.
+        website:
+          type: string
+          maxLength: 200
+          pattern: "^https?://"
+
+    CommentAuthor:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        website:
+          type: string
+
+    CreateCommentRequest:
+      type: object
+      required: [author, body]
+      additionalProperties: false
+      properties:
+        parentId:
+          type: string
+          description: ID of the comment being replied to; must belong to the same post.
+        author:
+          $ref: "#/components/schemas/CommentAuthorInput"
+        body:
+          type: string
+          minLength: 1
+          maxLength: 2000
+
+    Comment:
+      type: object
+      required: [id, postSlug, author, body, status, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        postSlug:
+          type: string
+        parentId:
+          type: string
+        author:
+          $ref: "#/components/schemas/CommentAuthor"
+        body:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, rejected, spam]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CommentList:
+      type: object
+      required: [items, pagination]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Comment"
+        pagination:
+          type: object
+          required: [limit, offset, count]
+          properties:
+            limit:
+              type: integer
+            offset:
+              type: integer
+            count:
+              type: integer

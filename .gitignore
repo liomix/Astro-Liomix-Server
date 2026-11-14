@@ -1,0 +1,22 @@
+# Build output
+/bin/
+/dist/
+coverage.out
+coverage.html
+
+# Local environment
+.env
+.env.local
+
+# Editor / OS noise
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Go workspace files kept out of the repo
+go.work
+go.work.sum
+
+.workbuddy
+docs
