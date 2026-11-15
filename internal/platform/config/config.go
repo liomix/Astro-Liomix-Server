@@ -71,32 +71,28 @@ type Mail struct {
 	SiteURL  string
 }
 
-// Spam configures the third-party content filter that runs before a comment is
-// stored. The default provider is "none", which means every comment starts
-// pending — the behaviour the service had before this existed.
+// Spam configures the built-in comment filter.
+//
+// Everything it needs is local: no key, no network, no per-comment cost. The
+// tuning below is the whole configuration surface — a comment scoring at or
+// above the threshold is stored as spam, never deleted, so a false positive
+// costs one review click.
 type Spam struct {
-	// Provider is none, akismet or llm.
-	Provider string
-	// AkismetKey and AkismetSiteURL are the WordPress.com key and the URL the
-	// site is registered under. Both are required for that provider.
-	AkismetKey     string
-	AkismetSiteURL string
-	// LLMEndpoint is an OpenAI-compatible /chat/completions URL. Model is the
-	// model name; Key may be empty for a local server.
-	LLMEndpoint string
-	LLMKey      string
-	LLMModel    string
-	// LLMTimeout bounds one classification request. A slow filter must not
-	// hold a reader's POST open indefinitely.
-	LLMTimeout time.Duration
+	// Enabled turns the filter on. Off means every comment waits for a human,
+	// which is what the service did before the filter existed.
+	Enabled bool
+	// Threshold is the score at which a comment is stored as spam.
+	Threshold int
+	// Window, MaxPerIP and MaxPerEmail drive the volume rules: how many
+	// comments one address or one email may post before it starts scoring.
+	Window      time.Duration
+	MaxPerIP    int
+	MaxPerEmail int
+	// LexiconFile is an optional alternative word list. Empty uses the one
+	// compiled into the binary; a path is read once at startup, so a typo shows
+	// up in the log rather than in a silently weaker filter.
+	LexiconFile string
 }
-
-// Spam providers.
-const (
-	SpamNone    = "none"
-	SpamAkismet = "akismet"
-	SpamLLM     = "llm"
-)
 
 // Mail TLS modes.
 const (
@@ -201,8 +197,11 @@ func Load() (*Config, error) {
 			SiteName: "Astro Liomix",
 		},
 		Spam: Spam{
-			Provider:   SpamNone,
-			LLMTimeout: 15 * time.Second,
+			Enabled:     true,
+			Threshold:   60,
+			Window:      10 * time.Minute,
+			MaxPerIP:    5,
+			MaxPerEmail: 3,
 		},
 	}
 
@@ -254,13 +253,12 @@ func Load() (*Config, error) {
 		cfg.Mail.FromName = cfg.Mail.SiteName
 	}
 
-	cfg.Spam.Provider = strings.ToLower(envString("SPAM_PROVIDER", cfg.Spam.Provider))
-	cfg.Spam.AkismetKey = strings.TrimSpace(os.Getenv("AKISMET_KEY"))
-	cfg.Spam.AkismetSiteURL = strings.TrimRight(envString("AKISMET_SITE_URL", cfg.Mail.SiteURL), "/")
-	cfg.Spam.LLMEndpoint = strings.TrimSpace(os.Getenv("LLM_ENDPOINT"))
-	cfg.Spam.LLMKey = strings.TrimSpace(os.Getenv("LLM_API_KEY"))
-	cfg.Spam.LLMModel = strings.TrimSpace(os.Getenv("LLM_MODEL"))
-	loadDuration("LLM_TIMEOUT", &cfg.Spam.LLMTimeout, &errs)
+	loadBool("SPAM_ENABLED", &cfg.Spam.Enabled, &errs)
+	loadInt("SPAM_THRESHOLD", &cfg.Spam.Threshold, &errs)
+	loadDuration("SPAM_WINDOW", &cfg.Spam.Window, &errs)
+	loadInt("SPAM_MAX_PER_IP", &cfg.Spam.MaxPerIP, &errs)
+	loadInt("SPAM_MAX_PER_EMAIL", &cfg.Spam.MaxPerEmail, &errs)
+	cfg.Spam.LexiconFile = strings.TrimSpace(os.Getenv("SPAM_LEXICON_FILE"))
 
 	if err := errors.Join(errs...); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -433,29 +431,21 @@ func loadBool(key string, dst *bool, errs *[]error) {
 
 // validate reports every reason the spam settings cannot be used as written.
 func (s Spam) validate() error {
+	if !s.Enabled {
+		return nil
+	}
 	var errs []error
-	switch s.Provider {
-	case SpamNone:
-	case SpamAkismet:
-		if s.AkismetKey == "" {
-			errs = append(errs, errors.New("AKISMET_KEY is required when SPAM_PROVIDER=akismet"))
-		}
-		if s.AkismetSiteURL == "" {
-			errs = append(errs, errors.New("AKISMET_SITE_URL (or SITE_URL) is required when SPAM_PROVIDER=akismet"))
-		}
-	case SpamLLM:
-		if s.LLMEndpoint == "" {
-			errs = append(errs, errors.New("LLM_ENDPOINT is required when SPAM_PROVIDER=llm"))
-		}
-		if s.LLMModel == "" {
-			errs = append(errs, errors.New("LLM_MODEL is required when SPAM_PROVIDER=llm"))
-		}
-		if s.LLMTimeout <= 0 {
-			errs = append(errs, errors.New("LLM_TIMEOUT must be positive"))
-		}
-	default:
-		errs = append(errs, fmt.Errorf("SPAM_PROVIDER %q must be one of %s, %s, %s",
-			s.Provider, SpamNone, SpamAkismet, SpamLLM))
+	if s.Threshold <= 0 || s.Threshold > 1000 {
+		errs = append(errs, errors.New("SPAM_THRESHOLD must be between 1 and 1000"))
+	}
+	if s.Window <= 0 {
+		errs = append(errs, errors.New("SPAM_WINDOW must be positive"))
+	}
+	if s.MaxPerIP <= 0 {
+		errs = append(errs, errors.New("SPAM_MAX_PER_IP must be positive"))
+	}
+	if s.MaxPerEmail <= 0 {
+		errs = append(errs, errors.New("SPAM_MAX_PER_EMAIL must be positive"))
 	}
 	return errors.Join(errs...)
 }

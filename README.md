@@ -308,11 +308,11 @@ cmd ──┬──▶ comment ──┬──┐
 | `ADMIN_BOOTSTRAP_USERNAME` | 空 | 可选：自动化部署时引导首个账号；手动创建请用 `server admin create`。与下一项必须同时设置 |
 | `ADMIN_BOOTSTRAP_PASSWORD` | 空 | 可选：引导账号的密码，≥12 字符；账号表非空时忽略 |
 | `ADMIN_COOKIE_SECURE` | `false` | `/admin` 控制台 cookie 是否加 `Secure`。HTTPS 部署必须打开；本地 http 必须关闭 |
-| `SPAM_PROVIDER` | `none` | 反垃圾来源：`none` / `akismet` / `llm`。启用后只可能把评论标成垃圾，不会自动发布 |
-| `AKISMET_KEY` | 空 | `SPAM_PROVIDER=akismet` 时必填；启动时会 `verify-key` 一次 |
-| `AKISMET_SITE_URL` | 空（回落到 `SITE_URL`） | Akismet 站点地址，必须与注册时一致 |
-| `LLM_ENDPOINT` | 空 | OpenAI 兼容的 `/chat/completions` 地址；`SPAM_PROVIDER=llm` 时必填 |
-| `LLM_MODEL` / `LLM_API_KEY` | 空 | 模型名与密钥；本地模型可以不给密钥。`LLM_TIMEOUT` 默认 `15s` |
+| `SPAM_ENABLED` | `true` | 内置反垃圾开关。命中只把评论标成 `spam`（进审核列表），不会删除、也不会自动发布 |
+| `SPAM_THRESHOLD` | `60` | 评分阈值：达到即判垃圾。硬信号（联系方式、重复正文、IP 刷屏）单条就能到线，软信号要叠加 |
+| `SPAM_WINDOW` | `10m` | 频率类规则的统计窗口 |
+| `SPAM_MAX_PER_IP` / `SPAM_MAX_PER_EMAIL` | `5` / `3` | 窗口内同一 IP / 同一邮箱超过这个条数就开始计分 |
+| `SPAM_LEXICON_FILE` | 空 | 外部词库路径。留空用编译进二进制的 `internal/platform/spam/anti-spam-1.txt`；指向外部文件时启动读一次，改完重启生效 |
 | `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | 空 / `587` / `auto` | **只用于首次导入**：邮件设置存在 `mail_settings` 表里、由 `/admin/mail` 编辑；这组环境变量仅在表里还没有那一行时被写入一次。`MAIL_ENABLED` 已废弃（没有总开关了） |
 | `MAIL_USERNAME` / `MAIL_PASSWORD` | 空 | 同上，仅首次导入。明文连接下 `PlainAuth` 只对 localhost 生效 |
 | `MAIL_FROM` / `MAIL_FROM_NAME` | 空 / `SITE_NAME` | 同上，仅首次导入。发件人邮箱与显示名 |
@@ -332,12 +332,17 @@ cmd ──┬──▶ comment ──┬──┐
 
 ### 反垃圾
 
-`comment.Moderator` 是唯一的接入点，`cmd/server/spam.go` 把第三方过滤器适配成它：
+`internal/platform/spam` 是一套**本地规则引擎**，没有第三方服务、没有密钥、没有网络请求：
 
-- **Akismet**：`comment-check`，需要客户端 IP（`X-Forwarded-For` 一律不信任，取 `RemoteAddr`），启动时先 `verify-key`。
-- **LLM**：OpenAI 兼容接口，提示词要求返回 `{"spam":bool,"reason":"..."}`；解析器容忍代码块和前后解释，模型没给出 `spam` 字段就当失败。
-- 过滤器**只能降级**：判定垃圾 → 存成 `spam`；判定正常 → 仍然是 `pending`。让第三方决定「发布」，等于把站点交给它。
-- 过滤器不可用（超时、429、字段缺失）→ 记 warning，评论保持 `pending`，与没有过滤器时完全一致。
+- **硬信号与软信号分开判**：`命中任一硬规则` 即判垃圾；否则要求 `软分 ≥ SPAM_THRESHOLD` **且** `不同类别的软证据 ≥ 2`。两个弱的同类信号（三条链接、两个关键词组）只算一次观察，加规则不会让误判率线性上升。
+- **硬规则**（单条即成立）：正文/昵称里出现微信号、Telegram、手机号；正文含 `<script>` / `javascript:` 之类可执行标记；昵称里带链接；窗口内出现一模一样的正文；同一 IP 刷屏超过上限。
+- **软信号叠加**：链接数量与可疑域名（短链、批量注册 TLD）、一次性邮箱、关键词表、字符重复度、西里尔字母混写、大写比例、UA 像脚本、正文超长。
+- **匹配前先规范化**：全角字母折成半角、去掉零宽字符与软连字符、空白压成一个、统一小写——`ｗｅｃｈａｔ`、`赌\u200b场`、`ca\u00adsino` 这类排版规避在进入规则前就被还原。
+- **词库是文本文件**：`internal/platform/spam/anti-spam-1.txt`（编进二进制做兜底），格式是 `[分组名 分值]` + 一行一个词，`#` 注释；分组分值决定命中一次加多少分。要换词库就把 `SPAM_LEXICON_FILE` 指向自己的文件，改完重启即可，不必重新编译。解析失败会在启动日志里警告并回落到内置词库。
+- **有状态但只在内存**：按 IP / 邮箱 / 正文指纹统计窗口内的次数，最多记 `MaxTracked` 个键；超了宁可清空历史，也不无限增长。进程重启丢窗口，代价只是可能漏掉一条重复。
+- **判定只能降级**：垃圾 → 存成 `spam`；其余 → 仍是 `pending`。让规则决定「发布」等于把站点交给一张词表。
+- 匹配到的规则会写进服务日志（`score` + `reasons`），评论人看不到，避免被反向利用。
+- `comment.Moderator` 仍是唯一接入点，`cmd/server/spam.go` 做适配；过滤器如果因为 ctx 取消没给出答案，评论保持 `pending`。
 
 ### 邮件通知
 

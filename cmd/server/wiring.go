@@ -60,42 +60,42 @@ func mailSeed(cfg config.Mail) mail.Settings {
 	return seed
 }
 
-// newSpamModerator builds the configured filter, reporting whether one exists.
+// newSpamModerator builds the built-in filter, reporting whether it is on.
 //
-// A filter that cannot be constructed is logged and skipped rather than failing
-// startup: refusing to serve comments because a third-party key is wrong turns
-// an optional feature into an outage.
+// The filter has no key and no network, so there is nothing to verify and
+// nothing that can fail at startup: an enabled filter either runs, or the tuning
+// was invalid and Load has already rejected it.
 func newSpamModerator(cfg *config.Config, logger *slog.Logger) (comment.Moderator, bool) {
-	switch cfg.Spam.Provider {
-	case config.SpamAkismet:
-		checker, err := spam.NewAkismet(cfg.Spam.AkismetKey, cfg.Spam.AkismetSiteURL, 10*time.Second)
-		if err != nil {
-			logger.Error("spam filter disabled", slog.String("provider", "akismet"), slog.Any("error", err))
-			return nil, false
-		}
-		// Verifying at startup puts a rejected key next to the configuration
-		// that caused it instead of in a warning on the first comment.
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := checker.Verify(ctx); err != nil {
-			logger.Warn("akismet key not verified; comments will stay pending until it is fixed",
-				slog.Any("error", err))
-		}
-		logger.Info("spam filter enabled", slog.String("provider", "akismet"))
-		return spamModerator{checker: checker, logger: logger, siteURL: cfg.Spam.AkismetSiteURL}, true
-
-	case config.SpamLLM:
-		checker, err := spam.NewLLM(cfg.Spam.LLMEndpoint, cfg.Spam.LLMKey, cfg.Spam.LLMModel, cfg.Spam.LLMTimeout)
-		if err != nil {
-			logger.Error("spam filter disabled", slog.String("provider", "llm"), slog.Any("error", err))
-			return nil, false
-		}
-		logger.Info("spam filter enabled",
-			slog.String("provider", "llm"),
-			slog.String("model", cfg.Spam.LLMModel))
-		return spamModerator{checker: checker, logger: logger, siteURL: cfg.Mail.SiteURL}, true
-
-	default:
+	if !cfg.Spam.Enabled {
 		return nil, false
 	}
+
+	options := []spam.Option{}
+	if cfg.Spam.LexiconFile != "" {
+		groups, err := spam.LoadLexiconFile(cfg.Spam.LexiconFile)
+		if err != nil {
+			logger.Warn("spam word list not used, keeping the built-in one",
+				slog.String("path", cfg.Spam.LexiconFile),
+				slog.Any("error", err))
+		} else {
+			options = append(options, spam.WithLexicon(groups))
+			logger.Info("spam word list loaded",
+				slog.String("path", cfg.Spam.LexiconFile),
+				slog.Int("groups", len(groups)))
+		}
+	}
+
+	tuning := spam.DefaultConfig()
+	tuning.Threshold = cfg.Spam.Threshold
+	tuning.Window = cfg.Spam.Window
+	tuning.MaxPerIP = cfg.Spam.MaxPerIP
+	tuning.MaxPerEmail = cfg.Spam.MaxPerEmail
+
+	logger.Info("spam filter enabled",
+		slog.Int("threshold", tuning.Threshold),
+		slog.Duration("window", tuning.Window),
+		slog.Int("max_per_ip", tuning.MaxPerIP),
+		slog.Int("max_per_email", tuning.MaxPerEmail))
+	options = append(options, spam.WithConfig(tuning))
+	return spamModerator{checker: spam.New(options...), logger: logger}, true
 }

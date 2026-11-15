@@ -13,8 +13,8 @@ import (
 //
 // It can only ever make a comment *less* visible: a spam verdict stores the
 // comment as spam, and anything else leaves it pending. Auto-approving on a
-// "not spam" answer would turn a third-party service into the publisher of this
-// blog, which is not a decision a filter gets to make.
+// "not spam" answer would turn a rule table into the publisher of this blog,
+// which is not a decision a filter gets to make.
 //
 // A filter that fails is not a filter that said "fine": the error is logged and
 // the comment stays pending, so an outage degrades to the behaviour the site had
@@ -22,7 +22,6 @@ import (
 type spamModerator struct {
 	checker spam.Checker
 	logger  *slog.Logger
-	siteURL string
 }
 
 var _ comment.Moderator = spamModerator{}
@@ -35,7 +34,6 @@ func (m spamModerator) Review(ctx context.Context, c *comment.Comment, meta comm
 		Website:   c.Author.Website,
 		Body:      c.Body,
 		PostSlug:  c.PostSlug,
-		SiteURL:   m.siteURL,
 		IP:        meta.IP,
 		UserAgent: meta.UserAgent,
 		Referer:   meta.Referer,
@@ -53,6 +51,7 @@ func (m spamModerator) Review(ctx context.Context, c *comment.Comment, meta comm
 	m.logger.InfoContext(ctx, "spam filter rejected a comment",
 		slog.String("comment_id", c.ID),
 		slog.String("post_slug", c.PostSlug),
-		slog.String("reason", verdict.Reason))
+		slog.Int("score", verdict.Score),
+		slog.Any("reasons", verdict.Reasons))
 	return comment.StatusSpam, nil
 }
