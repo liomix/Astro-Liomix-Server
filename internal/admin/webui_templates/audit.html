@@ -1,74 +1,92 @@
 {{define "content"}}
 <div class="page-head">
   <div>
-    <h1 class="page-title">操作日志</h1>
-    <p class="page-sub">登录、账号变更与评论审核都记录在此，只追加、不可修改。</p>
+    <h1 class="page-head__title">最近活动</h1>
+    <p class="page-head__sub">登录、审核与设置变更都记录在此，最新的排在最前。</p>
   </div>
-  <form method="get" action="/admin/audit" class="d-flex flex-wrap gap-2">
-    <input class="form-control form-control-sm filter-input" name="action" value="{{.Action}}" placeholder="按动作筛选，如 auth.login" aria-label="按动作筛选">
-    <button class="btn btn-sm btn-outline-secondary" type="submit">{{template "iconSearch"}}筛选</button>
-    {{if .Action}}<a class="btn btn-sm btn-outline-secondary" href="/admin/audit">清除</a>{{end}}
+  <form class="cluster" method="get" action="/admin/audit">
+    <label class="sr-only" for="action">按动作筛选</label>
+    <input class="input input--sm" id="action" name="action" value="{{.Action}}" placeholder="按动作筛选，如 auth.login">
+    <button class="btn btn--sm btn--outline" type="submit">{{template "iconSearch"}}筛选</button>
+    {{if .Action}}<a class="btn btn--sm btn--ghost" href="/admin/audit">清除</a>{{end}}
   </form>
 </div>
 
-<div class="card shadow-sm">
+<form id="audit-bulk" class="bulk" method="post" action="/admin/audit/bulk" data-bulk>
+  <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+  <input type="hidden" name="return" value="{{.Action}}">
+  <span class="bulk__count" data-bulk-count>未选中</span>
+  <button class="btn btn--sm btn--danger" type="submit" name="action" value="delete"
+          data-confirm="删除选中的活动记录？该操作不可撤销。" disabled data-bulk-submit>
+    {{template "iconTrash"}}删除选中
+  </button>
+  <span class="bulk__hint">只用于清掉误记的条目；删除动作本身也会留下一条记录。</span>
+</form>
+
+<section class="panel">
   {{if .Entries}}
-  <div class="table-responsive">
-    <table class="table table-hover align-middle mb-0">
+  <div class="table-wrap">
+    <table class="table">
       <thead>
         <tr>
-          <th scope="col">时间</th>
-          <th scope="col">操作者</th>
-          <th scope="col">动作</th>
-          <th scope="col">对象</th>
-          <th scope="col">详情</th>
-          <th scope="col">来源</th>
+          <th class="table__check">
+            <input class="check" type="checkbox" data-bulk-all="audit-bulk" aria-label="全选">
+          </th>
+          <th>时间</th>
+          <th>操作者</th>
+          <th>动作</th>
+          <th>对象</th>
+          <th>详情</th>
+          <th>来源</th>
         </tr>
       </thead>
       <tbody>
         {{range .Entries}}
         <tr>
-          <td class="text-secondary small text-nowrap" title="{{fmtTime .At}}">{{relTime .At}}</td>
+          <td class="table__check">
+            <input class="check" type="checkbox" data-bulk-id="{{.ID}}" aria-label="选择这条活动">
+          </td>
+          <td class="muted smaller nowrap" title="{{fmtTime .At}}">{{relTime .At}}</td>
           <td>
             {{if .Actor.Name}}
-            <div class="d-flex align-items-start gap-2">
-              <span class="avatar avatar-sm" aria-hidden="true">{{firstRune .Actor.Name}}</span>
-              <div class="min-w-0">
-                <div class="small fw-semibold">{{.Actor.Name}}</div>
-                <div class="small text-secondary">{{if .Actor.IP}}{{.Actor.IP}}{{else}}—{{end}}</div>
+            <div class="author">
+              <span class="avatar" aria-hidden="true">{{firstRune .Actor.Name}}</span>
+              <div class="author__body">
+                <div class="author__name">{{.Actor.Name}}</div>
+                <div class="author__meta">{{if .Actor.IP}}{{.Actor.IP}}{{else}}—{{end}}</div>
               </div>
             </div>
             {{else}}
-            <span class="text-secondary small">system</span>
+            <span class="muted small">system</span>
             {{end}}
           </td>
           <td>
-    <div class="small">{{actionLabel .Action}}</div>
-    <div class="text-secondary small mono">{{.Action}}</div>
-  </td>
+            <div class="small">{{actionLabel .Action}}</div>
+            <div class="muted smaller mono">{{.Action}}</div>
+          </td>
           <td>
             <code class="mono">{{.Resource}}</code>
-            {{if .ResourceID}}<div class="text-secondary small text-break">{{.ResourceID}}</div>{{end}}
+            {{if .ResourceID}}<div class="muted smaller break">{{.ResourceID}}</div>{{end}}
           </td>
           <td><code class="mono">{{jsonDetail .Detail}}</code></td>
-          <td class="text-secondary small text-break">{{.Actor.UserAgent}}</td>
+          <td class="muted smaller break">{{.Actor.UserAgent}}</td>
         </tr>
         {{end}}
       </tbody>
     </table>
   </div>
   {{else}}
-  <div class="card-body text-center py-5">
-    <span class="empty-icon">{{template "iconSearch"}}</span>
-    <div class="fw-semibold small">没有匹配的记录</div>
-    <div class="text-secondary small">{{if .Action}}换一个动作名，或清除筛选。{{else}}登录、审核或修改账号后，记录会出现在这里。{{end}}</div>
+  <div class="empty">
+    <span class="empty__icon">{{template "iconClock"}}</span>
+    <div class="empty__title">没有匹配的记录</div>
+    <div class="empty__text">{{if .Action}}换一个动作名，或清除筛选。{{else}}登录、审核或修改设置后，记录会出现在这里。{{end}}</div>
   </div>
   {{end}}
-</div>
+</section>
 
 {{if .NextCursor}}
-<div class="d-flex justify-content-end mt-3">
-  <a class="btn btn-sm btn-outline-secondary" href="/admin/audit?action={{.Action}}&cursor={{.NextCursor}}">下一页</a>
+<div class="pager">
+  <a class="btn btn--sm btn--outline" href="/admin/audit?cursor={{urlquery .NextCursor}}{{if .Action}}&amp;action={{urlquery .Action}}{{end}}">下一页</a>
 </div>
 {{end}}
 {{end}}

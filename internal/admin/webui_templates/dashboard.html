@@ -1,129 +1,109 @@
 {{define "content"}}
 <div class="page-head">
   <div>
-    <h1 class="page-title">{{.Greeting}}，{{.Account.DisplayName}}</h1>
-    <p class="page-sub">{{.Date}}</p>
+    <h1 class="page-head__title">{{.Greeting}}，{{.Account.DisplayName}}</h1>
+    <p class="page-head__sub">{{.Date}}</p>
   </div>
 </div>
 
 {{if .HasModeration}}
-<div class="row g-3">
-  <div class="col-6 col-xl-3">
-    <div class="stat-card">
-      <div class="d-flex align-items-start justify-content-between">
-        <div>
-          <div class="stat-label">待审评论</div>
-          <div class="stat-value">{{index .Counts "pending"}}</div>
-        </div>
-        <span class="stat-icon warn">{{template "iconInbox"}}</span>
-      </div>
-      <div class="stat-note">等待人工通过后才对读者可见</div>
+<div class="grid grid--stats">
+  <div class="stat">
+    <div class="stat__top">
+      <span class="stat__label">待审评论</span>
+      <span class="stat__icon is-warn">{{template "iconInbox"}}</span>
     </div>
+    <div class="stat__value">{{index .Counts "pending"}}</div>
+    <div class="stat__note">等待人工通过后才对读者可见</div>
   </div>
-  <div class="col-6 col-xl-3">
-    <div class="stat-card">
-      <div class="d-flex align-items-start justify-content-between">
-        <div>
-          <div class="stat-label">今日新增</div>
-          <div class="stat-value">{{.Today}}</div>
-        </div>
-        <span class="stat-icon info">{{template "iconClock"}}</span>
-      </div>
-      <div class="stat-note">从今天 0 点起收到的评论</div>
+  <div class="stat">
+    <div class="stat__top">
+      <span class="stat__label">今日新增</span>
+      <span class="stat__icon is-info">{{template "iconClock"}}</span>
     </div>
+    <div class="stat__value">{{.Today}}</div>
+    <div class="stat__note">从今天 0 点起收到的评论</div>
   </div>
-  <div class="col-6 col-xl-3">
-    <div class="stat-card">
-      <div class="d-flex align-items-start justify-content-between">
-        <div>
-          <div class="stat-label">已通过</div>
-          <div class="stat-value">{{index .Counts "approved"}}</div>
-        </div>
-        <span class="stat-icon ok">{{template "iconCheck"}}</span>
-      </div>
-      <div class="stat-note">当前对读者可见的评论</div>
+  <div class="stat">
+    <div class="stat__top">
+      <span class="stat__label">已通过</span>
+      <span class="stat__icon is-ok">{{template "iconCheck"}}</span>
     </div>
+    <div class="stat__value">{{index .Counts "approved"}}</div>
+    <div class="stat__note">当前对读者可见的评论</div>
   </div>
-  <div class="col-6 col-xl-3">
-    <div class="stat-card">
-      <div class="d-flex align-items-start justify-content-between">
-        <div>
-          <div class="stat-label">垃圾 / 拒绝</div>
-          <div class="stat-value">{{index .Counts "spam"}}</div>
-        </div>
-        <span class="stat-icon danger">{{template "iconShieldX"}}</span>
-      </div>
-      <div class="stat-note">另有 {{index .Counts "rejected"}} 条被拒绝</div>
+  <div class="stat">
+    <div class="stat__top">
+      <span class="stat__label">垃圾 / 拒绝</span>
+      <span class="stat__icon is-danger">{{template "iconShieldX"}}</span>
     </div>
+    <div class="stat__value">{{index .Counts "spam"}}</div>
+    <div class="stat__note">另有 {{index .Counts "rejected"}} 条被拒绝</div>
   </div>
 </div>
 {{end}}
 
-<div class="row g-3 mt-1">
+<div class="grid {{if .HasModeration}}grid--split mt-grid{{end}}">
   {{if .HasModeration}}
-  <div class="col-12 col-xl-7">
-    <section class="panel h-100">
-      <header class="panel-head">
-        <div>
-          <h2 class="panel-title">待审评论</h2>
-          <p class="panel-sub">最近提交、还等你决定的评论</p>
-        </div>
-        <a class="panel-link" href="/admin/comments?status=pending">全部 →</a>
-      </header>
-      {{if .Recent}}
-      <ul class="feed">
-        {{range .Recent}}
-        <li class="feed-item">
-          <span class="feed-avatar" aria-hidden="true">{{firstRune .AuthorName}}</span>
-          <div class="feed-body">
-            <div class="feed-title"><strong>{{.AuthorName}}</strong> 在 <code class="mono">{{.PostSlug}}</code></div>
-            <div class="feed-text">{{.Body}}</div>
-            <div class="feed-meta">{{relTime .CreatedAt}}</div>
-          </div>
-          <a class="feed-action" href="/admin/comments?status=pending">处理</a>
-        </li>
-        {{end}}
-      </ul>
-      {{else}}
-      <div class="panel-empty">
-        <span class="empty-icon">{{template "iconCheck"}}</span>
-        <div class="fw-semibold small">没有待审评论</div>
-        <div class="text-secondary small">新评论会先出现在这里。</div>
+  <section class="panel">
+    <header class="panel__head">
+      <div>
+        <h2 class="panel__title">待审评论</h2>
+        <p class="panel__sub">最近提交、还等你决定的评论</p>
       </div>
+      <a class="panel__link" href="/admin/comments?status=pending">全部 →</a>
+    </header>
+    {{if .Recent}}
+    <ul class="feed">
+      {{range .Recent}}
+      <li class="feed__item">
+        <span class="feed__avatar" aria-hidden="true">{{firstRune .AuthorName}}</span>
+        <div class="feed__body">
+          <div class="feed__title"><strong>{{.AuthorName}}</strong> 在 <code class="mono">{{.PostSlug}}</code></div>
+          <div class="feed__text">{{.Body}}</div>
+          <div class="feed__meta">{{relTime .CreatedAt}}</div>
+        </div>
+        <a class="feed__action" href="/admin/comments?status=pending">处理</a>
+      </li>
       {{end}}
-    </section>
-  </div>
+    </ul>
+    {{else}}
+    <div class="panel__empty">
+      <span class="empty__icon">{{template "iconCheck"}}</span>
+      <div class="empty__title">没有待审评论</div>
+      <div class="empty__text">新评论会先出现在这里。</div>
+    </div>
+    {{end}}
+  </section>
   {{end}}
 
-  <div class="col-12 {{if .HasModeration}}col-xl-5{{end}}">
-    <section class="panel h-100">
-      <header class="panel-head">
-        <div>
-          <h2 class="panel-title">最近活动</h2>
-          <p class="panel-sub">最近的登录记录</p>
-        </div>
-        <a class="panel-link" href="/admin/audit?action=auth.login">全部 →</a>
-      </header>
-      {{if .Entries}}
-      <ul class="feed">
-        {{range .Entries}}
-        <li class="feed-item">
-          <span class="feed-avatar" aria-hidden="true">{{firstRune .Actor.Name}}</span>
-          <div class="feed-body">
-            <div class="feed-title">{{.Actor.Name}} 登录</div>
-            <div class="feed-meta">IP {{if .Actor.IP}}{{.Actor.IP}}{{else}}未知{{end}} · {{relTime .At}}</div>
-          </div>
-        </li>
-        {{end}}
-      </ul>
-      {{else}}
-      <div class="panel-empty">
-        <span class="empty-icon">{{template "iconClock"}}</span>
-        <div class="fw-semibold small">还没有登录记录</div>
-        <div class="text-secondary small">每次登录都会出现在这里。</div>
+  <section class="panel">
+    <header class="panel__head">
+      <div>
+        <h2 class="panel__title">最近活动</h2>
+        <p class="panel__sub">最近的登录记录</p>
       </div>
+      <a class="panel__link" href="/admin/audit?action=auth.login">全部 →</a>
+    </header>
+    {{if .Entries}}
+    <ul class="feed">
+      {{range .Entries}}
+      <li class="feed__item">
+        <span class="feed__avatar" aria-hidden="true">{{firstRune .Actor.Name}}</span>
+        <div class="feed__body">
+          <div class="feed__title">{{.Actor.Name}} 登录</div>
+          <div class="feed__meta">IP {{if .Actor.IP}}{{.Actor.IP}}{{else}}未知{{end}} · {{relTime .At}}</div>
+        </div>
+      </li>
       {{end}}
-    </section>
-  </div>
+    </ul>
+    {{else}}
+    <div class="panel__empty">
+      <span class="empty__icon">{{template "iconClock"}}</span>
+      <div class="empty__title">还没有登录记录</div>
+      <div class="empty__text">每次登录都会出现在这里。</div>
+    </div>
+    {{end}}
+  </section>
 </div>
 {{end}}

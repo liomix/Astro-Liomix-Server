@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -54,18 +53,27 @@ const (
 	actionPasswordChange = "account.password_change"
 	actionSessionRevoke  = "session.revoke"
 	actionBootstrap      = "account.bootstrap"
+	// actionAuditDelete records the removal of trail rows. It is written after
+	// the delete, so the trail stays a record of what happened rather than
+	// silently getting shorter.
+	actionAuditDelete = "audit.delete"
 )
+
+// maxAuditDeleteIDs bounds one purge, matching the comment queue's batch limit:
+// a selection larger than this is a mistake or an attempt to empty the table
+// through a form, and both deserve no more than a refusal.
+const maxAuditDeleteIDs = 100
 
 // Service holds the administrator use cases.
 type Service struct {
-	repo        Repository
-	auditor     audit.Recorder
-	auditReader AuditReader
-	hasher      passwordHasher
-	ids         id.Generator
-	now         func() time.Time
-	sessionTTL  time.Duration
-	logger      *slog.Logger
+	repo       Repository
+	auditor    audit.Recorder
+	auditStore AuditStore
+	hasher     passwordHasher
+	ids        id.Generator
+	now        func() time.Time
+	sessionTTL time.Duration
+	logger     *slog.Logger
 	// storePlaintext keeps the initial password so the development console can
 	// show it. Off in production: a plaintext credential at rest is a risk that
 	// only local convenience justifies.
@@ -112,12 +120,13 @@ func WithAuditor(r audit.Recorder) Option {
 	}
 }
 
-// WithAuditReader exposes the trail through the service, so the console can
-// read what WithAuditor recorded. A store passed as both is the usual wiring.
-func WithAuditReader(r AuditReader) Option {
+// WithAuditStore exposes the trail through the service, so the console can
+// read what WithAuditor recorded and clear rows that should not be there. A
+// store passed as both is the usual wiring.
+func WithAuditStore(r AuditStore) Option {
 	return func(s *Service) {
 		if r != nil {
-			s.auditReader = r
+			s.auditStore = r
 		}
 	}
 }
@@ -627,51 +636,6 @@ func (s *Service) DeleteAccount(ctx context.Context, accountID string, actor aud
 	return nil
 }
 
-// MailPreferences are the notification switches the console owns. They live in
-// the database rather than in the environment because "stop emailing me" is a
-// decision made while looking at the page, and a restart is not an answer.
-//
-// Both default to off: a fresh deployment sends no notification mail until
-// somebody turns it on, which is the safe direction to fail in.
-type MailPreferences struct {
-	ReplyNotify bool
-	AdminNotify bool
-}
-
-// Settings keys. Dotted and stable, like the audit actions.
-const (
-	settingMailReplyNotify = "mail.reply_notify"
-	settingMailAdminNotify = "mail.admin_notify"
-)
-
-// MailPreferences reads the notification switches.
-func (s *Service) MailPreferences(ctx context.Context) (MailPreferences, error) {
-	values, err := s.repo.Settings(ctx)
-	if err != nil {
-		return MailPreferences{}, fmt.Errorf("read mail preferences: %w", err)
-	}
-	return MailPreferences{
-		ReplyNotify: values[settingMailReplyNotify] == "true",
-		AdminNotify: values[settingMailAdminNotify] == "true",
-	}, nil
-}
-
-// SetMailPreferences stores the notification switches.
-func (s *Service) SetMailPreferences(ctx context.Context, prefs MailPreferences, actor audit.Actor) error {
-	values := map[string]string{
-		settingMailReplyNotify: strconv.FormatBool(prefs.ReplyNotify),
-		settingMailAdminNotify: strconv.FormatBool(prefs.AdminNotify),
-	}
-	if err := s.repo.PutSettings(ctx, values); err != nil {
-		return fmt.Errorf("write mail preferences: %w", err)
-	}
-	s.record(ctx, actor, actionSettingsUpdate, "settings", "mail", map[string]any{
-		"replyNotify": prefs.ReplyNotify,
-		"adminNotify": prefs.AdminNotify,
-	})
-	return nil
-}
-
 // ChangePasswordInput is a password change or reset.
 type ChangePasswordInput struct {
 	// CurrentPassword is required when an account changes its own password and
@@ -823,18 +787,65 @@ func (s *Service) Bootstrap(ctx context.Context, username, displayName, password
 // audit endpoint is mounted on this rather than on the recorder: a deployment
 // that writes a trail but does not expose it should not advertise a route that
 // answers 501.
-func (s *Service) HasAuditTrail() bool { return s.auditReader != nil }
+func (s *Service) HasAuditTrail() bool { return s.auditStore != nil }
 
 // ListAuditLogs returns one page of the trail, newest first.
 func (s *Service) ListAuditLogs(ctx context.Context, q audit.Query) ([]*audit.Entry, string, error) {
-	if s.auditReader == nil {
+	if s.auditStore == nil {
 		return nil, "", apperr.ErrUnavailable
 	}
-	entries, next, err := s.auditReader.List(ctx, q)
+	entries, next, err := s.auditStore.List(ctx, q)
 	if err != nil {
 		return nil, "", fmt.Errorf("list audit log: %w", err)
 	}
 	return entries, next, nil
+}
+
+// DeleteAuditLogs removes entries from the trail and reports how many went.
+//
+// The trail is append-only in normal operation, so this is not a retention
+// tool: it exists for rows that should never have been written (a mis-click
+// recorded under the wrong identity, a probe left behind by a smoke test). The
+// removal is recorded as its own entry, so shortening the trail still leaves a
+// trace of who shortened it.
+func (s *Service) DeleteAuditLogs(ctx context.Context, ids []string, actor audit.Actor) (int, error) {
+	if s.auditStore == nil {
+		return 0, apperr.ErrUnavailable
+	}
+
+	unique := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, duplicate := seen[id]; duplicate {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return 0, &apperr.ValidationError{Field: "ids", Code: apperr.FieldRequired, Message: "is required"}
+	}
+	if len(unique) > maxAuditDeleteIDs {
+		return 0, &apperr.ValidationError{
+			Field:   "ids",
+			Code:    apperr.FieldOutOfRange,
+			Message: fmt.Sprintf("must hold at most %d identifiers", maxAuditDeleteIDs),
+		}
+	}
+
+	removed, err := s.auditStore.Delete(ctx, unique)
+	if err != nil {
+		return 0, fmt.Errorf("delete audit entries: %w", err)
+	}
+	s.record(ctx, actor, actionAuditDelete, "audit_log", "", map[string]any{
+		"requested": len(unique),
+		"affected":  removed,
+	})
+	return removed, nil
 }
 
 // PruneExpiredSessions deletes sessions that expired before now, so the table

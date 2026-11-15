@@ -2,8 +2,10 @@ package mail
 
 import (
 	"bytes"
+	"html"
 	htmltemplate "html/template"
 	"strings"
+	"time"
 )
 
 // CommentNotice is everything a notification needs, expressed without any
@@ -18,9 +20,11 @@ type CommentNotice struct {
 	// ConsoleURL is where an operator reviews the comment. Empty disables the
 	// link, which is the right answer for a deployment without the console.
 	ConsoleURL string
-	PostSlug   string
-	AuthorName string
-	Body       string
+	PostSlug    string
+	AuthorName  string
+	AuthorEmail string
+	Body        string
+	CreatedAt   time.Time
 	// ParentAuthor is the commenter being replied to. Empty for a top-level
 	// comment, which is what makes the two messages different.
 	ParentAuthor string
@@ -131,3 +135,65 @@ var replyTemplate = htmltemplate.Must(htmltemplate.New("reply").Parse(`<!DOCTYPE
   <p style="margin:0;font-size:12px;color:#9ca3af;line-height:1.6;">此邮件由 {{.SiteName}} 自动发送，请勿直接回复。</p>
 </div>
 </body></html>`))
+
+// Tokens lists what a custom body may contain. The names are the ones the
+// console shows, so an operator can copy them out of the page.
+var Tokens = []string{
+	"siteName", "siteURL", "postSlug", "postURL", "consoleURL",
+	"authorName", "authorEmail", "parentAuthor", "body", "time",
+}
+
+// RenderTemplate fills a custom body with the notice.
+//
+// This is string replacement, not html/template, and that is deliberate on two
+// counts: the body is a whole document the operator pasted (parsing it as a
+// template would let a stray "{{" anywhere in their CSS break every mail), and
+// replacing tokens keeps every value escaped exactly once. Unknown tokens are
+// left as written, so a typo is visible in the message instead of silently
+// disappearing.
+func RenderTemplate(body string, n CommentNotice) string {
+	values := map[string]string{
+		"siteName":     fallback(n.SiteName, "站点"),
+		"siteURL":      n.SiteURL,
+		"postSlug":     n.PostSlug,
+		"postURL":      n.PostURL(),
+		"consoleURL":   n.ConsoleURL,
+		"authorName":   n.AuthorName,
+		"authorEmail":  n.AuthorEmail,
+		"parentAuthor": n.ParentAuthor,
+		"body":         n.Body,
+		"time":         formatTime(n.CreatedAt),
+	}
+
+	out := body
+	for _, token := range Tokens {
+		out = strings.ReplaceAll(out, "{{"+token+"}}", html.EscapeString(values[token]))
+	}
+	return out
+}
+
+// WithCustomBody swaps the built-in HTML for the operator's, when there is one.
+//
+// The plain-text part is kept: it is the fallback for a client that shows no
+// HTML at all, and it describes the same comment. A body that renders to
+// nothing (an empty setting, a template that is only tokens) falls back to the
+// built-in message rather than sending a blank one.
+func WithCustomBody(m Message, body string, n CommentNotice) Message {
+	if strings.TrimSpace(body) == "" {
+		return m
+	}
+	rendered := RenderTemplate(body, n)
+	if strings.TrimSpace(rendered) == "" {
+		return m
+	}
+	m.HTML = rendered
+	return m
+}
+
+// formatTime renders the comment time for a template, in local time.
+func formatTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Local().Format("2006-01-02 15:04")
+}

@@ -140,6 +140,60 @@ func TestStoreFilters(t *testing.T) {
 	}
 }
 
+func TestStoreDelete(t *testing.T) {
+	store := newStore(t)
+	ctx := context.Background()
+	base := time.Now().UTC().Truncate(time.Microsecond)
+
+	for i, e := range []audit.Event{
+		{Actor: audit.Actor{Name: "ada"}, Action: "auth.login", Resource: "session", At: base},
+		{Actor: audit.Actor{Name: "ada"}, Action: "auth.logout", Resource: "session", At: base.Add(time.Second)},
+		{Actor: audit.Actor{Name: "ada"}, Action: "account.update", Resource: "account", At: base.Add(2 * time.Second)},
+	} {
+		if err := store.Record(ctx, e); err != nil {
+			t.Fatalf("Record(%d) error = %v", i, err)
+		}
+	}
+	entries, _, err := store.List(ctx, audit.Query{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3", len(entries))
+	}
+
+	removed, err := store.Delete(ctx, []string{entries[0].ID, entries[1].ID})
+	if err != nil {
+		t.Fatalf("Delete() error = %v", err)
+	}
+	if removed != 2 {
+		t.Errorf("removed = %d, want 2", removed)
+	}
+
+	left, _, err := store.List(ctx, audit.Query{Limit: 10})
+	if err != nil {
+		t.Fatalf("List() after delete error = %v", err)
+	}
+	if len(left) != 1 || left[0].ID != entries[2].ID {
+		t.Fatalf("remaining = %+v, want only the oldest entry", left)
+	}
+
+	// An id that is already gone is not an error: a page rendered before
+	// someone else's purge is a normal thing to submit.
+	removed, err = store.Delete(ctx, []string{entries[0].ID})
+	if err != nil {
+		t.Fatalf("Delete(missing) error = %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removing a missing id = %d, want 0", removed)
+	}
+
+	// Nothing to delete is a no-op, not a statement with an empty IN list.
+	if removed, err := store.Delete(ctx, nil); err != nil || removed != 0 {
+		t.Errorf("Delete(nil) = %d, %v; want 0, nil", removed, err)
+	}
+}
+
 func TestStoreRejectsIncompleteEvents(t *testing.T) {
 	store := newStore(t)
 	ctx := context.Background()

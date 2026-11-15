@@ -350,7 +350,7 @@ func (r *memoryRepository) DeleteExpiredSessions(ctx context.Context, before tim
 }
 
 // memoryAudit records and lists the trail without a database. It implements
-// both admin.AuditReader and audit.Recorder, which is what cmd/server does with
+// both admin.AuditStore and audit.Recorder, which is what cmd/server does with
 // *audit.Store.
 type memoryAudit struct {
 	mu     sync.Mutex
@@ -360,7 +360,7 @@ type memoryAudit struct {
 
 var (
 	_ audit.Recorder = (*memoryAudit)(nil)
-	_ AuditReader    = (*memoryAudit)(nil)
+	_ AuditStore     = (*memoryAudit)(nil)
 )
 
 func newMemoryAudit() *memoryAudit { return &memoryAudit{} }
@@ -440,6 +440,32 @@ func (m *memoryAudit) eventsByAction(action string) []*audit.Entry {
 		}
 	}
 	return out
+}
+
+// Delete drops the named events and reports how many were still there.
+func (m *memoryAudit) Delete(ctx context.Context, ids []string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	wanted := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		wanted[id] = struct{}{}
+	}
+
+	kept := m.events[:0]
+	removed := 0
+	for _, e := range m.events {
+		if _, drop := wanted[e.ID]; drop {
+			removed++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	m.events = kept
+	return removed, nil
 }
 
 // fakeClock is a manually advanced time source, so a test can cross a session

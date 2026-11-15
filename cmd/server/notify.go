@@ -15,17 +15,17 @@ import (
 // immediately. A comment that just got approved must not wait for an SMTP
 // handshake, and a mail server that is down must not make the approval look
 // like it failed.
+//
+// The switches are read per message rather than captured at startup, so turning
+// a notice off on the page takes effect on the next comment.
 type commentNotifier struct {
 	queue   *mail.Queue
 	logger  *slog.Logger
 	site    string
 	siteURL string
-	// admin receives a notice for every approved comment. Empty disables it.
-	admin string
-	// prefs reads the two switches the console owns. They are read per message
-	// rather than captured at startup, so flipping one takes effect on the next
-	// comment instead of the next deploy. Nil means "off".
-	prefs func(ctx context.Context) (replyNotify, adminNotify bool)
+	// settings reads the current configuration. Nil means "not configured",
+	// which is treated as everything off.
+	settings func(ctx context.Context) (mail.Settings, error)
 }
 
 var _ comment.Notifier = commentNotifier{}
@@ -37,28 +37,42 @@ func (n commentNotifier) Notify(ctx context.Context, notification comment.Notifi
 		return nil
 	}
 
+	settings := mail.Settings{}
+	if n.settings != nil {
+		loaded, err := n.settings(ctx)
+		if err != nil {
+			n.logger.WarnContext(ctx, "read mail settings", slog.Any("error", err))
+			return nil
+		}
+		settings = loaded
+	}
+	// A half-configured account is not worth a dial attempt per comment.
+	if !settings.Configured() {
+		return nil
+	}
+
 	notice := mail.CommentNotice{
-		SiteName:   n.site,
-		SiteURL:    n.siteURL,
-		PostSlug:   c.PostSlug,
-		AuthorName: c.Author.Name,
-		Body:       c.Body,
+		SiteName:    n.site,
+		SiteURL:     n.siteURL,
+		PostSlug:    c.PostSlug,
+		AuthorName:  c.Author.Name,
+		AuthorEmail: c.Author.Email,
+		Body:        c.Body,
+		CreatedAt:   c.CreatedAt,
 	}
 
-	replyNotify, adminNotify := false, false
-	if n.prefs != nil {
-		replyNotify, adminNotify = n.prefs(ctx)
-	}
-
-	if adminNotify && n.admin != "" {
-		message := mail.NewCommentForAdmin(notice)
-		message.To = n.admin
-		if !n.queue.Enqueue(message) {
-			n.logger.DebugContext(ctx, "admin notification dropped", slog.String("comment_id", c.ID))
+	if settings.AdminNotify {
+		for _, to := range settings.AdminTo {
+			message := mail.WithCustomBody(mail.NewCommentForAdmin(notice), settings.TemplateAdmin, notice)
+			message.To = to
+			if !n.queue.Enqueue(message) {
+				n.logger.DebugContext(ctx, "admin notification dropped",
+					slog.String("comment_id", c.ID), slog.String("to", redactRecipient(to)))
+			}
 		}
 	}
 
-	if !replyNotify || notification.Parent == nil {
+	if !settings.ReplyNotify || notification.Parent == nil {
 		return nil
 	}
 	parent := notification.Parent
@@ -73,10 +87,19 @@ func (n commentNotifier) Notify(ctx context.Context, notification comment.Notifi
 	}
 
 	notice.ParentAuthor = parent.Author.Name
-	message := mail.NewReply(notice)
+	message := mail.WithCustomBody(mail.NewReply(notice), settings.TemplateReply, notice)
 	message.To = to
 	if !n.queue.Enqueue(message) {
 		n.logger.DebugContext(ctx, "reply notification dropped", slog.String("comment_id", c.ID))
 	}
 	return nil
+}
+
+// redactRecipient keeps a log line useful without recording who reads the blog.
+func redactRecipient(addr string) string {
+	at := strings.LastIndex(addr, "@")
+	if at <= 0 {
+		return "***"
+	}
+	return addr[:1] + "***" + addr[at:]
 }

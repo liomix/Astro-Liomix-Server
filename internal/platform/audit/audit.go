@@ -9,6 +9,11 @@
 // Recording is best effort. A failure to append to the trail is logged and the
 // caller continues: refusing a moderation action because the audit table is
 // full would turn an observability problem into an outage.
+//
+// Nothing updates a row: a record is appended once and read forever. The one
+// exception is Delete, which exists so an operator can clear rows that should
+// never have been written; the caller records that removal as a new event, so a
+// purge is visible in the trail it just shortened.
 package audit
 
 import (
@@ -16,6 +21,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
@@ -222,6 +228,36 @@ func (s *Store) List(ctx context.Context, q Query) ([]*Entry, string, error) {
 	entries = entries[:limit]
 	last := entries[len(entries)-1]
 	return entries, cursor.Encode(cursor.Cursor{CreatedAt: last.At, ID: last.ID}), nil
+}
+
+// Delete removes the named entries and reports how many rows went away.
+//
+// The trail is append-only by design, so this exists for one job: an operator
+// clearing rows that should never have been written (a mis-click recorded with
+// the wrong identity, a test entry left in production). It is not a retention
+// mechanism — that belongs in a scheduled prune with a documented window.
+func (s *Store) Delete(ctx context.Context, ids []string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	args := make([]any, 0, len(ids))
+	placeholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+
+	result, err := s.db.ExecContext(ctx,
+		`DELETE FROM audit_logs WHERE id IN (`+strings.Join(placeholders, ", ")+`)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete %d audit entries: %w", len(ids), err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete %d audit entries: %w", len(ids), err)
+	}
+	return int(affected), nil
 }
 
 // rowScanner is the part of *sql.Rows that scanEntry needs.

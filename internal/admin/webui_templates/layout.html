@@ -5,154 +5,175 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>{{.Title}}</title>
-<link rel="stylesheet" href="/admin/assets/bootstrap.min.css?v={{.AssetVersion}}">
 <link rel="stylesheet" href="/admin/assets/app.css?v={{.AssetVersion}}">
 <script src="/admin/assets/theme.js?v={{.AssetVersion}}"></script>
 <script src="/admin/assets/app.js?v={{.AssetVersion}}" defer></script>
 </head>
-<body class="{{if .Account}}app-body{{else}}auth{{end}}">
-<a class="visually-hidden-focusable position-absolute top-0 start-0 p-2 bg-body" href="#main">跳到主要内容</a>
-<div class="console-toasts" id="toasts" aria-live="polite">
-  {{if .Account}}{{if .Account.PasswordInitial}}
-  <div class="console-toast warn" role="status" data-snooze="10" data-timeout="12000">
-    <span class="toast-icon">{{template "iconKey"}}</span>
+<body class="{{if .Account}}app{{else}}auth{{end}}">
+<a class="skip-link" href="#main">跳到主要内容</a>
+<div class="toasts" id="toasts" aria-live="polite">
+  {{if .Account}}{{if .Account.PasswordInitial}}{{if eq .Nav "home"}}
+  <div class="toast toast--warn" role="status" data-snooze="10" data-snooze-on-timeout data-timeout="12000">
+    <span class="toast__icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>仍在使用初始密码</strong>
       账号 <span class="mono">{{.Account.Username}}</span> 的密码是创建时生成的，请改成只有你知道的密码。
     </div>
-    <a class="toast-action" href="/admin/profile">去修改</a>
-    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+    <button class="toast__action" type="button" data-dialog-open="profile-dialog">去修改</button>
+    <button class="toast__close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
-  {{end}}{{end}}
+  {{end}}{{end}}{{end}}
   {{if .InitialUsername}}
-  <div class="console-toast warn" role="status" data-snooze="10" data-timeout="12000">
-    <span class="toast-icon">{{template "iconKey"}}</span>
+  <div class="toast toast--warn" role="status" data-snooze="10" data-timeout="12000">
+    <span class="toast__icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>仍在使用初始密码</strong>
       账号 <code>{{.InitialUsername}}</code>，初始密码 <code>{{.InitialPassword}}</code>。<br>
       登录后请立即修改；改密后这条提示会消失。
     </div>
-    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+    <button class="toast__close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
   {{if .LoginTip}}
-  <div class="console-toast info" role="status" data-timeout="8000">
-    <span class="toast-icon">{{template "iconKey"}}</span>
+  <div class="toast toast--info" role="status" data-timeout="8000">
+    <span class="toast__icon">{{template "iconInfo"}}</span>
     <div class="grow">
       <strong>首次登录？</strong>
       管理员账号由服务器上的 <code>server admin create</code> 创建，初始密码只显示一次；登录后请立即修改。
     </div>
-    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+    <button class="toast__close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
   {{if .NoAccounts}}
-  <div class="console-toast warn" role="status" data-timeout="10000">
-    <span class="toast-icon">{{template "iconAlert"}}</span>
+  <div class="toast toast--warn" role="status" data-timeout="10000">
+    <span class="toast__icon">{{template "iconAlert"}}</span>
     <div class="grow">
       <strong>还没有管理员账号</strong>
       在服务器上运行 <code>server admin create -username &lt;name&gt;</code> 创建第一个账号。
     </div>
-    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+    <button class="toast__close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
   {{if .Error}}
-  <div class="console-toast err" role="alert" data-timeout="10000">
-    <span class="toast-icon">{{template "iconAlert"}}</span>
+  <div class="toast toast--err" role="alert" data-timeout="10000">
+    <span class="toast__icon">{{template "iconAlert"}}</span>
     <div class="grow">{{.Error}}</div>
-    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+    <button class="toast__close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
   {{if .Flash}}
-  <div class="console-toast ok" role="status" data-timeout="6000">
-    <span class="toast-icon">{{template "iconCheck"}}</span>
+  <div class="toast toast--ok" role="status" data-timeout="6000">
+    <span class="toast__icon">{{template "iconCheck"}}</span>
     <div class="grow">{{.Flash}}</div>
-    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+    <button class="toast__close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
 </div>
 {{if .Account}}
-<nav class="app-nav sticky-top">
-  <div class="container-xl app-nav-inner">
-    <a class="app-brand" href="/admin">
-      <span class="brand-mark">{{template "iconShield"}}</span>
-      <span class="app-brand-text">管理后台</span>
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="/admin">
+      <span class="brand__mark">{{template "iconShield"}}</span>
+      <span class="brand__name">管理后台</span>
     </a>
-    <ul class="nav app-tabs">
-      <li class="nav-item"><a class="nav-link {{if eq .Nav "home"}}active{{end}}" {{if eq .Nav "home"}}aria-current="page"{{end}} href="/admin">首页</a></li>
+    <nav class="tabs" aria-label="主导航">
+      <a class="tab {{if eq .Nav "home"}}is-active{{end}}" {{if eq .Nav "home"}}aria-current="page"{{end}} href="/admin">首页</a>
       {{if .HasModeration}}
-      <li class="nav-item"><a class="nav-link {{if eq .Nav "comments"}}active{{end}}" {{if eq .Nav "comments"}}aria-current="page"{{end}} href="/admin/comments">评论管理</a></li>
+      <a class="tab {{if eq .Nav "comments"}}is-active{{end}}" {{if eq .Nav "comments"}}aria-current="page"{{end}} href="/admin/comments">评论管理</a>
       {{end}}
       {{if .HasMail}}
-      <li class="nav-item"><a class="nav-link {{if eq .Nav "mail"}}active{{end}}" {{if eq .Nav "mail"}}aria-current="page"{{end}} href="/admin/mail">邮件管理</a></li>
+      <a class="tab {{if eq .Nav "mail"}}is-active{{end}}" {{if eq .Nav "mail"}}aria-current="page"{{end}} href="/admin/mail">邮件管理</a>
       {{end}}
-    </ul>
-    <details class="avatar-menu ms-auto">
-      <summary class="avatar-summary" aria-label="账号与设置">
-        <span class="avatar" aria-hidden="true">{{firstRune .Account.DisplayName}}</span>
-      </summary>
-      <div class="avatar-panel">
-        <div class="avatar-panel-head">
-          <div class="fw-semibold small">{{.Account.DisplayName}}</div>
+    </nav>
+    <div class="topbar__user">
+      <details class="menu">
+        <summary class="menu__trigger" aria-label="账号与设置">
+          <span class="avatar" aria-hidden="true">{{firstRune .Account.DisplayName}}</span>
+        </summary>
+        <div class="menu__panel">
+          <div class="menu__head">
+            <div class="menu__name">{{.Account.DisplayName}}</div>
+          </div>
+          <button class="menu__item" type="button" data-dialog-open="profile-dialog">账号设置</button>
+          <form method="post" action="/admin/logout" class="m-0">
+            <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+            <button class="menu__item" type="submit">退出登录</button>
+          </form>
         </div>
-        <button class="avatar-item" type="button" data-dialog-open="profile-dialog">账号设置</button>
-        <form method="post" action="/admin/logout" class="m-0">
-          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-          <button class="avatar-item" type="submit">退出登录</button>
-        </form>
-      </div>
-    </details>
+      </details>
+    </div>
   </div>
-</nav>
+</header>
 {{end}}
+<main id="main" class="{{if .Account}}page{{end}}">
+  {{template "content" .}}
+</main>
 {{if .Account}}
-<dialog class="app-dialog" id="profile-dialog" aria-labelledby="profile-dialog-title">
-  <div class="app-dialog-head">
-    <h2 class="panel-title" id="profile-dialog-title">账号设置</h2>
-    <button class="dialog-close" type="button" data-dialog-close aria-label="关闭">×</button>
+<dialog class="dialog" id="profile-dialog" aria-labelledby="profile-dialog-title">
+  <div class="dialog__head">
+    <div class="dialog__identity">
+      <span class="avatar avatar--xl" aria-hidden="true">{{firstRune .Account.DisplayName}}</span>
+      <div class="dialog__identity-text">
+        <h2 class="dialog__title" id="profile-dialog-title">{{.Account.DisplayName}}</h2>
+        <p class="dialog__sub">
+          <span class="mono">{{.Account.Username}}</span>
+          <span aria-hidden="true">·</span>
+          <span>管理员</span>
+          {{if .Account.PasswordInitial}}<span class="badge badge--pending">仍是初始密码</span>{{end}}
+        </p>
+      </div>
+    </div>
+    <button class="dialog__close" type="button" data-dialog-close aria-label="关闭">{{template "iconX"}}</button>
   </div>
-  <div class="app-dialog-body">
-    <form method="post" action="/admin/profile">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <label class="form-label small fw-semibold" for="dialog-display-name">显示名</label>
-      <div class="d-flex gap-2">
-        <input class="form-control" id="dialog-display-name" name="displayName" value="{{.Account.DisplayName}}" maxlength="80" required>
-        <button class="btn btn-primary flex-shrink-0" type="submit">保存</button>
-      </div>
-    </form>
-    <div class="dialog-divider"></div>
-    <form method="post" action="/admin/profile/password">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <label class="form-label small fw-semibold" for="dialog-current-password">当前密码</label>
-      <input class="form-control mb-2" id="dialog-current-password" type="password" name="currentPassword"
-             autocomplete="current-password" required>
-      <label class="form-label small fw-semibold" for="dialog-new-password">新密码</label>
-      <div class="d-flex gap-2">
-        <input class="form-control" id="dialog-new-password" type="password" name="password"
-               autocomplete="new-password" required placeholder="至少 12 位">
-        <button class="btn btn-danger flex-shrink-0" type="submit">修改</button>
-      </div>
-      <div class="form-text">修改后所有设备都需要用新密码重新登录。</div>
-    </form>
+  <div class="dialog__body">
+    <section class="dialog__section">
+      <h3 class="dialog__section-title">显示资料</h3>
+      <p class="dialog__section-sub">显示名出现在右上角菜单和首页问候里，随时可以改。</p>
+      <form method="post" action="/admin/profile">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <div class="field">
+          <label class="field__label" for="dialog-display-name">显示名</label>
+          <input class="input" id="dialog-display-name" name="displayName" value="{{.Account.DisplayName}}" maxlength="80" required data-autofocus>
+        </div>
+        <div class="dialog__actions">
+          <button class="btn btn--primary" type="submit">保存资料</button>
+        </div>
+      </form>
+    </section>
+    <hr class="dialog__rule">
+    <section class="dialog__section">
+      <h3 class="dialog__section-title">登录密码</h3>
+      <p class="dialog__section-sub">改完之后这台设备和其它设备都要用新密码重新登录。</p>
+      <form method="post" action="/admin/profile/password">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <div class="field">
+          <label class="field__label" for="dialog-current-password">当前密码</label>
+          <input class="input" id="dialog-current-password" type="password" name="currentPassword" autocomplete="current-password" required>
+        </div>
+        <div class="field">
+          <label class="field__label" for="dialog-new-password">新密码</label>
+          <input class="input" id="dialog-new-password" type="password" name="password" autocomplete="new-password" required placeholder="至少 12 位，且不能与用户名相同">
+          <span class="field__hint">建议用密码管理器生成一串随机的。</span>
+        </div>
+        <div class="dialog__actions">
+          <button class="btn btn--danger" type="submit">修改密码</button>
+        </div>
+      </form>
+    </section>
   </div>
 </dialog>
 {{end}}
-
-<main id="main" {{if .Account}}class="container-xl py-4"{{end}}>
-  {{template "content" .}}
-</main>
 </body>
 </html>{{end}}
 
 {{define "iconShield"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12.2l1.8 1.8 3.4-3.6"/></svg>{{end}}
 {{define "iconKey"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="4"/><path d="M12 12h8"/><path d="M17 12v3"/><path d="M20 12v2"/></svg>{{end}}
 {{define "iconAlert"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4l9 16H3L12 4z"/><path d="M12 10v4"/><path d="M12 17.5v.5"/></svg>{{end}}
+{{define "iconInfo"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 8v.5"/></svg>{{end}}
 {{define "iconCheck"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>{{end}}
 {{define "iconX"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>{{end}}
 {{define "iconTrash"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>{{end}}
 {{define "iconInbox"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M4 13h5l1.5 2h3L15 13h5"/></svg>{{end}}
-{{define "iconLogout"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h9"/></svg>{{end}}
 {{define "iconSearch"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg>{{end}}
 {{define "iconClock"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4.5l3 1.8"/></svg>{{end}}
-{{define "iconChat"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5z"/></svg>{{end}}
 {{define "iconShieldX"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 9.5l5 5"/><path d="M14.5 9.5l-5 5"/></svg>{{end}}
-{{define "iconUser"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1.5-3.5 4-5 7-5s5.5 1.5 7 5"/></svg>{{end}}

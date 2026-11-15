@@ -1,27 +1,21 @@
 {{define "content"}}
-<div class="auth-shell min-vh-100 d-flex align-items-center justify-content-center p-3">
-  <div class="card border-0 shadow-sm login-card">
-    <div class="card-body p-4">
-      <div class="d-flex align-items-center gap-2 mb-4">
-        <span class="brand-mark">{{template "iconShield"}}</span>
-        <span class="fw-semibold">管理后台</span>
-      </div>
-      <h1 class="h4 mb-1">管理员登录</h1>
-      <p class="text-secondary small mb-4">使用管理员账号继续。</p>
-      <form method="post" action="/admin/login">
-        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-        <div class="mb-3">
-          <label class="form-label small fw-semibold" for="login-username">用户名</label>
-          <input class="form-control" id="login-username" name="username" autocomplete="username" required autofocus>
-        </div>
-        <div class="mb-3">
-          <label class="form-label small fw-semibold" for="login-password">密码</label>
-          <input class="form-control" id="login-password" type="password" name="password" autocomplete="current-password" required>
-        </div>
-        <button class="btn btn-primary w-100" type="submit">登录</button>
-      </form>
-      <p class="text-secondary text-center small mt-3 mb-0">仅限授权管理员访问。</p>
-    </div>
+<div class="auth__card">
+  <div class="auth__head">
+    <span class="auth__mark">{{template "iconShield"}}</span>
+    <h1 class="auth__title">管理员登录</h1>
+    <p class="auth__sub">只有站点所有者可以进入</p>
   </div>
+  <form method="post" action="/admin/login">
+    <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+    <div class="field mb-3">
+      <label class="field__label" for="login-username">用户名</label>
+      <input class="input" id="login-username" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="field mb-4">
+      <label class="field__label" for="login-password">密码</label>
+      <input class="input" id="login-password" type="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn btn--primary btn--block" type="submit">登录</button>
+  </form>
 </div>
 {{end}}

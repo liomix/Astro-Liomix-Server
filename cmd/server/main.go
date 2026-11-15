@@ -20,6 +20,7 @@ import (
 	"github.com/liomix/astro-liomix-server/internal/platform/config"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
 	"github.com/liomix/astro-liomix-server/internal/platform/idempotency"
+	"github.com/liomix/astro-liomix-server/internal/platform/mail"
 	"github.com/liomix/astro-liomix-server/internal/platform/postgres"
 )
 
@@ -100,19 +101,24 @@ func run() error {
 		logger.Info("pruned idempotency keys", slog.Int64("rows", pruned))
 	}
 
-	// Notifications are queued, not sent inline: approving a comment must not
-	// wait for an SMTP handshake, and a mail server that is down must not turn
-	// an approval into an error.
-	mailQueue, closeMailQueue, err := newMailQueue(cfg, logger)
-	if err != nil {
-		return fmt.Errorf("configure mail: %w", err)
+	// Outbound mail is configured from the console, so the queue reads the
+	// settings row on every attempt. The row is seeded once from the
+	// environment, which is how a deployment that already had MAIL_* arrives
+	// here without anyone retyping it; the page owns it afterwards.
+	mailStore := mail.NewStore(db)
+	if seeded, err := mailStore.Ensure(startupCtx, mailSeed(cfg.Mail)); err != nil {
+		logger.Warn("seed mail settings", slog.Any("error", err))
+	} else if seeded {
+		logger.Info("imported mail settings from the environment")
 	}
+
+	mailQueue, closeMailQueue := newMailQueue(mailStore, logger)
 	defer closeMailQueue()
 
-	// Filled in after the admin service is built. The comment service is
-	// constructed first, so the notifier reads through this indirection rather
-	// than capturing a service that does not exist yet.
-	var mailPrefs func(context.Context) (replyNotify, adminNotify bool)
+	readMailSettings := func(ctx context.Context) (mail.Settings, error) {
+		settings, _, err := mailStore.Load(ctx)
+		return settings, err
+	}
 
 	commentOptions := []comment.Option{
 		comment.WithLogger(logger),
@@ -121,24 +127,17 @@ func run() error {
 	if moderator, ok := newSpamModerator(cfg, logger); ok {
 		commentOptions = append(commentOptions, comment.WithModerator(moderator))
 	}
-	if cfg.Mail.Enabled {
-		commentOptions = append(commentOptions, comment.WithNotifier(commentNotifier{
-			queue:   mailQueue,
-			logger:  logger,
-			site:    cfg.Mail.SiteName,
-			siteURL: cfg.Mail.SiteURL,
-			admin:   cfg.Mail.Admin,
-			prefs: func(ctx context.Context) (bool, bool) {
-				// Assigned once the admin service exists, a few lines below:
-				// the comment service is built first, and a nil reader means
-				// "both switches off", not a crash.
-				if mailPrefs == nil {
-					return false, false
-				}
-				return mailPrefs(ctx)
-			},
-		}))
-	}
+	// Notifications are queued, not sent inline: approving a comment must not
+	// wait for an SMTP handshake, and a mail server that is down must not turn
+	// an approval into an error. The notifier is always attached and decides
+	// per comment: an install with mail switched off simply sends nothing.
+	commentOptions = append(commentOptions, comment.WithNotifier(commentNotifier{
+		queue:    mailQueue,
+		logger:   logger,
+		site:     cfg.Mail.SiteName,
+		siteURL:  cfg.Mail.SiteURL,
+		settings: readMailSettings,
+	}))
 
 	commentService, err := comment.NewService(commentRepo, commentOptions...)
 	if err != nil {
@@ -158,25 +157,13 @@ func run() error {
 		admin.WithLogger(logger),
 		admin.WithSessionTTL(cfg.Admin.SessionTTL),
 		admin.WithAuditor(auditStore),
-		admin.WithAuditReader(auditStore),
+		admin.WithAuditStore(auditStore),
 		// The plaintext of an initial password is only kept where the console is
 		// a local development tool; production never writes it.
 		admin.WithPlaintextInitialPassword(cfg.Env == config.EnvDevelopment),
 	)
 	if err != nil {
 		return fmt.Errorf("build admin service: %w", err)
-	}
-
-	// The switches live in the database, so the console can change them without
-	// a restart. A read failure means "off": losing a notification is better
-	// than sending mail nobody asked for.
-	mailPrefs = func(ctx context.Context) (bool, bool) {
-		prefs, err := adminService.MailPreferences(ctx)
-		if err != nil {
-			logger.Warn("read mail preferences", slog.Any("error", err))
-			return false, false
-		}
-		return prefs.ReplyNotify, prefs.AdminNotify
 	}
 
 	if pruned, err := adminService.PruneExpiredSessions(startupCtx); err != nil {
@@ -239,7 +226,12 @@ func run() error {
 				SecureCookies:            cfg.Admin.CookieSecure,
 				ShowInitialCredentials:   cfg.Env == config.EnvDevelopment,
 				PreferredInitialUsername: developmentAdminUsername,
-				Mail:                     mailPanel{cfg: cfg, queue: mailQueue, logger: logger},
+				Mail: mailPanel{
+					store:    mailStore,
+					siteName: cfg.Mail.SiteName,
+					logger:   logger,
+					timeout:  20 * time.Second,
+				},
 			})
 		},
 	)
@@ -323,6 +315,7 @@ func openDatabase(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
 		{"count", count.Migrate},
 		{"audit", audit.Migrate},
 		{"admin", admin.Migrate},
+		{"mail", mail.Migrate},
 		{"idempotency", idempotency.Migrate},
 	}
 	for _, step := range steps {

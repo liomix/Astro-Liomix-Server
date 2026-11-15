@@ -72,13 +72,19 @@ type Repository interface {
 	DeleteExpiredSessions(ctx context.Context, before time.Time) (int64, error)
 }
 
-// AuditReader lists the operator trail. *audit.Store implements it.
+// AuditStore is the console's access to the operator trail: newest-first pages,
+// plus removing rows that should never have been written.
 //
 // It is a separate port from audit.Recorder because the two are configured
 // separately: a deployment can record without exposing a reader, and a test can
 // assert what was recorded without a second implementation of a query language.
-type AuditReader interface {
+// *audit.Store implements both.
+type AuditStore interface {
 	List(ctx context.Context, q audit.Query) ([]*audit.Entry, string, error)
+	// Delete removes the named entries and reports how many rows went away.
+	// An id that no longer exists is not an error: a page rendered before
+	// someone else's purge is a normal thing to submit.
+	Delete(ctx context.Context, ids []string) (int, error)
 }
 
 // ModerationComment is one comment as the console shows it. It is a read model:
@@ -142,23 +148,37 @@ type ModerationQueue interface {
 	Delete(ctx context.Context, commentID string) error
 }
 
-// MailInfo is what the console shows about outbound mail. It is a snapshot of
-// configuration, not a place to change it: the SMTP credentials belong in the
-// environment, and a page that could edit them would be a credential editor.
-type MailInfo struct {
-	Enabled bool
-	Host    string
-	Port    int
-	TLS     string
-	From    string
-	// Admin is the address that receives new-comment notices, when configured.
-	Admin string
+// MailSettings is the outbound-mail configuration as the console edits it.
+//
+// Password is write-only. The page is never handed the stored value, so an
+// empty Password on the way in means "keep what is stored"; HasPassword says
+// whether anything is stored, which is all the page needs to know.
+type MailSettings struct {
+	Host        string
+	Port        int
+	TLS         string
+	Username    string
+	Password    string
+	HasPassword bool
+	From        string
+	FromName    string
+	AdminTo     []string
+	ReplyNotify bool
+	AdminNotify bool
+	// TemplateAdmin and TemplateReply are whole HTML documents pasted into the
+	// page. Empty means the template compiled into the binary.
+	TemplateAdmin string
+	TemplateReply string
 }
 
-// MailService is the mail subsystem as the console sees it.
+// MailService is the mail subsystem as the console sees it: one settings row to
+// read and write, and one way to prove the settings work.
 type MailService interface {
-	Info() MailInfo
-	// SendTest queues one message, so an operator can confirm the SMTP settings
-	// without waiting for a real comment to arrive.
+	Settings(ctx context.Context) (MailSettings, error)
+	// SaveSettings validates and stores the settings. An error wraps
+	// apperr.ValidationError when the form itself is wrong.
+	SaveSettings(ctx context.Context, in MailSettings) error
+	// SendTest delivers one message before answering, so the operator learns
+	// whether it worked instead of waiting for a comment.
 	SendTest(ctx context.Context, to string) error
 }

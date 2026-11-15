@@ -10,6 +10,7 @@ package mail
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/liomix/astro-liomix-server/internal/platform/id"
 )
 
 // Message is one rendered email. Both bodies are optional; a message with only
@@ -320,6 +323,10 @@ func render(m Message, cfg SMTPConfig) ([]byte, error) {
 		{"To", m.To},
 		{"Subject", subject},
 		{"Date", time.Now().Format(time.RFC1123Z)},
+		{"Message-ID", messageID(cfg.From)},
+		// Receivers treat a machine-written notice as bulk mail; saying so keeps
+		// vacation responders from replying to a noreply address.
+		{"Auto-Submitted", "auto-generated"},
 		{"MIME-Version", "1.0"},
 	}
 	for _, h := range headers {
@@ -343,24 +350,37 @@ func render(m Message, cfg SMTPConfig) ([]byte, error) {
 			{"text/html; charset=UTF-8", m.HTML},
 		} {
 			buf.WriteString("--" + boundary + "\r\n")
-			buf.WriteString("Content-Type: " + part.ctype + "\r\n")
-			buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-			buf.WriteString(normalizeNewlines(part.body))
-			buf.WriteString("\r\n")
+			writeBody(&buf, part.ctype, part.body)
 		}
 		buf.WriteString("--" + boundary + "--\r\n")
 	case m.HTML != "":
-		buf.WriteString("Content-Type: text/html; charset=UTF-8\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-		buf.WriteString(normalizeNewlines(m.HTML))
+		writeBody(&buf, "text/html; charset=UTF-8", m.HTML)
 	case m.Text != "":
-		buf.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
-		buf.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
-		buf.WriteString(normalizeNewlines(m.Text))
+		writeBody(&buf, "text/plain; charset=UTF-8", m.Text)
 	default:
 		return nil, errors.New("mail: message has neither text nor html body")
 	}
 	return []byte(buf.String()), nil
+}
+
+// writeBody appends one MIME body, base64 encoded, ending with CRLF.
+//
+// base64 rather than 8bit on purpose. It keeps the message 7-bit clean, so
+// delivery no longer depends on the server advertising 8BITMIME — a server that
+// does not support it is entitled to reject or silently discard the message —
+// and it wraps at 76 columns, which keeps a long HTML line clear of the
+// 998-character limit every server may enforce.
+func writeBody(buf *strings.Builder, contentType, body string) {
+	buf.WriteString("Content-Type: " + contentType + "\r\n")
+	buf.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+	encoded := base64.StdEncoding.EncodeToString([]byte(normalizeNewlines(body)))
+	for len(encoded) > 76 {
+		buf.WriteString(encoded[:76])
+		buf.WriteString("\r\n")
+		encoded = encoded[76:]
+	}
+	buf.WriteString(encoded)
+	buf.WriteString("\r\n")
 }
 
 func normalizeNewlines(s string) string {
@@ -377,6 +397,19 @@ func encodeHeader(value string) string {
 		}
 	}
 	return value
+}
+
+// messageID gives every message a unique identity.
+//
+// Receivers use it to spot duplicates and to decide a message is not a stray
+// relay attempt; mail without one is the kind that gets filtered without a
+// bounce, which is indistinguishable from "it never sent".
+func messageID(from string) string {
+	domain := "localhost"
+	if at := strings.LastIndex(from, "@"); at >= 0 && at < len(from)-1 {
+		domain = from[at+1:]
+	}
+	return "<" + id.RandomGenerator{}.New() + "@" + domain + ">"
 }
 
 // redactAddress keeps the domain and the first character, so a log line can be

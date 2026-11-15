@@ -2,6 +2,7 @@ package mail
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 	"sync"
 	"testing"
@@ -137,4 +138,110 @@ type blockingSender struct {
 func (s *blockingSender) Send(context.Context, Message) error {
 	<-s.release
 	return nil
+}
+
+func TestRenderEncodesBodiesAsBase64(t *testing.T) {
+	t.Parallel()
+
+	body, err := render(Message{
+		To:      "reader@example.com",
+		Subject: "hi",
+		Text:    "第一行\n第二行",
+		HTML:    "<p>第一行</p>",
+	}, SMTPConfig{From: "blog@example.com"})
+	if err != nil {
+		t.Fatalf("render() error = %v", err)
+	}
+	raw := string(body)
+
+	if strings.Contains(raw, "8bit") {
+		t.Error("the message still declares 8bit; it must stay 7-bit clean")
+	}
+	const header = "Content-Transfer-Encoding: base64\r\n\r\n"
+	start := strings.Index(raw, header)
+	if start < 0 {
+		t.Fatalf("no base64 part in:/n%s", raw)
+	}
+	payload := raw[start+len(header):]
+	if end := strings.Index(payload, "\r\n--"); end >= 0 {
+		payload = payload[:end]
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload, "\r\n", ""))
+	if err != nil {
+		t.Fatalf("decode part: %v", err)
+	}
+	if !strings.Contains(string(decoded), "第一行") {
+		t.Errorf("decoded text part = %q, want the body back", decoded)
+	}
+
+	// Every line of the encoded payload must respect the 76-column convention
+	// and the CRLF rule, which is what makes long HTML safe.
+	for _, line := range strings.Split(strings.TrimSuffix(payload, "\r\n"), "\r\n") {
+		if strings.ContainsAny(line, "\r\n") || len(line) > 76 {
+			t.Errorf("base64 line is %d characters, want at most 76", len(line))
+		}
+	}
+}
+
+func TestRenderTemplate(t *testing.T) {
+	t.Parallel()
+
+	notice := CommentNotice{
+		SiteName:     "博客",
+		SiteURL:      "https://example.com",
+		PostSlug:     "hello",
+		AuthorName:   "Ada",
+		AuthorEmail:  "ada@example.com",
+		Body:         "第一行\n<b>不是标签</b>",
+		ParentAuthor: "Grace",
+		CreatedAt:    time.Date(2026, 1, 2, 15, 4, 0, 0, time.UTC),
+	}
+	body := `<p>{{siteName}}|{{postSlug}}|{{postURL}}|{{authorName}}|{{authorEmail}}|` +
+		`{{parentAuthor}}|{{body}}|{{time}}|{{nope}}</p>`
+
+	got := RenderTemplate(body, notice)
+
+	for _, want := range []string{
+		"博客",
+		"hello",
+		"https://example.com/posts/hello",
+		"Ada",
+		"ada@example.com",
+		"Grace",
+		// The comment body is operator-visible text, not markup: a reader's
+		// literal "<b>" must arrive as characters, not as a tag.
+		"&lt;b&gt;不是标签&lt;/b&gt;",
+		notice.CreatedAt.Local().Format("2006-01-02 15:04"),
+		// An unknown token stays as written so a typo is visible.
+		"{{nope}}",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered body does not contain %q:/n%s", want, got)
+		}
+	}
+}
+
+func TestWithCustomBodyFallsBackToBuiltIn(t *testing.T) {
+	t.Parallel()
+
+	notice := CommentNotice{SiteName: "博客", PostSlug: "hello", AuthorName: "Ada", Body: "hi"}
+	builtin := NewReply(notice)
+
+	// An empty setting keeps the compiled template.
+	if got := WithCustomBody(builtin, "  \n ", notice); got.HTML != builtin.HTML {
+		t.Error("an empty body replaced the built-in HTML")
+	}
+
+	custom := WithCustomBody(builtin, "<p>只有这一段 {{authorName}}</p>", notice)
+	if !strings.Contains(custom.HTML, "只有这一段 Ada") {
+		t.Errorf("custom HTML = %q, want the operator's document", custom.HTML)
+	}
+	// The plain-text part survives: it is the fallback for a client that shows
+	// no HTML at all.
+	if custom.Text == "" {
+		t.Error("the plain-text part was dropped")
+	}
+	if custom.Subject != builtin.Subject {
+		t.Errorf("subject = %q, want the built-in one", custom.Subject)
+	}
 }

@@ -4,6 +4,21 @@
 (function () {
   'use strict';
 
+  // Post-redirect notices live in the URL (?msg=… / ?err=…), so refreshing the
+  // page would replay a toast about something that already happened. The
+  // message itself is rendered server-side, so dropping the parameters from the
+  // address bar loses nothing and stops the replay.
+  if (window.location.search) {
+    var params = new URLSearchParams(window.location.search);
+    if (params.has('msg') || params.has('err')) {
+      params.delete('msg');
+      params.delete('err');
+      var rest = params.toString();
+      window.history.replaceState(null, '',
+        window.location.pathname + (rest ? '?' + rest : '') + window.location.hash);
+    }
+  }
+
   var SNOOZE_COOKIE = 'admin_snooze_initial_password';
   // Matches the 200ms exit transition in app.css. Removing the node before the
   // animation ends would make the toast vanish instead of fade.
@@ -18,13 +33,14 @@
 
   var stack = document.getElementById('toasts');
   if (stack) {
-    // close(toast, byOperator) — only a deliberate dismissal snoozes the
-    // reminder. A toast that timed out must not silence the next page: the
-    // account would still hold its initial password and nothing would say so.
+    // close(toast, byOperator) — a deliberate dismissal snoozes the reminder,
+    // and so does one that timed out after being on screen, if the toast asks
+    // for it. A reminder that reappears on every single page load is a
+    // reminder nobody reads.
     function close(toast, byOperator) {
       if (!toast || toast.classList.contains('out')) return;
 
-      if (byOperator) {
+      if (byOperator || toast.hasAttribute('data-snooze-on-timeout')) {
         var minutes = Number(toast.getAttribute('data-snooze'));
         if (minutes > 0) setSnooze(minutes);
       }
@@ -73,24 +89,24 @@
     stack.addEventListener('click', function (event) {
       if (!(event.target instanceof Element)) return;
       var button = event.target.closest('[data-dismiss]');
-      if (button) close(button.closest('.console-toast'), true);
+      if (button) close(button.closest('.toast'), true);
     });
 
     // Escape dismisses the newest toast, which is what a keyboard user expects
     // from a message that appears without being asked for.
     document.addEventListener('keydown', function (event) {
       if (event.key !== 'Escape') return;
-      var toasts = stack.querySelectorAll('.console-toast:not(.out)');
+      var toasts = stack.querySelectorAll('.toast:not(.out)');
       if (toasts.length) close(toasts[toasts.length - 1], true);
     });
 
-    Array.prototype.forEach.call(stack.querySelectorAll('.console-toast'), arm);
+    Array.prototype.forEach.call(stack.querySelectorAll('.toast'), arm);
   }
 
   // The avatar menu is a <details> element, which the browser opens but never
   // closes on an outside click. Closing it here keeps it from covering the page
   // after the operator moved on.
-  Array.prototype.forEach.call(document.querySelectorAll('details.avatar-menu'), function (menu) {
+  Array.prototype.forEach.call(document.querySelectorAll('details.menu'), function (menu) {
     document.addEventListener('click', function (event) {
       if (!menu.open) return;
       if (!(event.target instanceof Node) || menu.contains(event.target)) return;
@@ -105,11 +121,15 @@
   // list of ids is written into the form on submit. Doing it here rather than
   // with the form="..." attribute keeps the submitted set identical to what the
   // count says, and lets a selected row be tinted without a second selector.
+  //
+  // Every action is its own submit button (name="action"), so the operator
+  // clicks once instead of choosing from a dropdown and pressing "go". A form
+  // can hold several, which is why the buttons are collected rather than
+  // queried one at a time.
   Array.prototype.forEach.call(document.querySelectorAll('form[data-bulk]'), function (form) {
     var boxes = document.querySelectorAll('[data-bulk-id]');
-    var submit = form.querySelector('[data-bulk-submit]');
+    var submits = form.querySelectorAll('[data-bulk-submit]');
     var count = form.querySelector('[data-bulk-count]');
-    var action = form.querySelector('select[name="action"]');
     var toggleAll = document.querySelector('[data-bulk-all="' + form.id + '"]');
 
     function checked() {
@@ -123,7 +143,9 @@
     function sync() {
       var chosen = checked();
       if (count) count.textContent = chosen.length === 0 ? '未选中' : '已选 ' + chosen.length + ' 项';
-      if (submit) submit.disabled = chosen.length === 0;
+      Array.prototype.forEach.call(submits, function (button) {
+        button.disabled = chosen.length === 0;
+      });
       if (toggleAll) {
         toggleAll.checked = chosen.length > 0 && chosen.length === boxes.length;
         toggleAll.indeterminate = chosen.length > 0 && chosen.length < boxes.length;
@@ -158,10 +180,6 @@
         hidden.value = box.getAttribute('data-bulk-id');
         form.appendChild(hidden);
       });
-      if (action && action.value === 'delete' &&
-          !window.confirm('确定对选中的条目执行删除？该操作不可撤销。')) {
-        event.preventDefault();
-      }
     });
 
     sync();
@@ -178,6 +196,10 @@
       if (!dialog) return;
       if (typeof dialog.showModal === 'function') {
         dialog.showModal();
+        // Without this the browser focuses the first focusable node, which is
+        // the close button: Enter would dismiss the dialog instead of saving.
+        var first = dialog.querySelector('[data-autofocus]');
+        if (first) first.focus();
       } else {
         // Without <dialog> support, the settings are unreachable; say so
         // rather than failing silently.
@@ -186,7 +208,7 @@
     });
   });
 
-  Array.prototype.forEach.call(document.querySelectorAll('dialog.app-dialog'), function (dialog) {
+  Array.prototype.forEach.call(document.querySelectorAll('dialog.dialog'), function (dialog) {
     Array.prototype.forEach.call(dialog.querySelectorAll('[data-dialog-close]'), function (button) {
       button.addEventListener('click', function () { dialog.close(); });
     });
@@ -202,10 +224,16 @@
   });
 
   // Destructive forms ask first. Declared here rather than with an inline
-  // onsubmit attribute so 'unsafe-inline' is not needed for scripts.
+  // onsubmit attribute so 'unsafe-inline' is not needed for scripts. A button
+  // can carry the question too: in a bulk bar only the delete button is
+  // destructive, and asking on every action would train the operator to click
+  // through the dialog.
   document.addEventListener('submit', function (event) {
     var form = event.target;
     var message = form.getAttribute('data-confirm');
+    if (!message && event.submitter) {
+      message = event.submitter.getAttribute('data-confirm');
+    }
     if (message && !window.confirm(message)) event.preventDefault();
   }, true);
 })();

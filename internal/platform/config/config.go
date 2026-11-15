@@ -343,7 +343,10 @@ func (c *Config) validate() error {
 	if c.Database.ConnMaxLifetime <= 0 {
 		errs = append(errs, errors.New("DATABASE_CONN_MAX_LIFETIME must be positive"))
 	}
-	return errors.Join(append(errs, c.Mail.validate(), c.Spam.validate())...)
+	// MAIL_* is not validated here any more: it is only a first-run import into
+	// the mail_settings row, and the console validates what it saves. A stale
+	// environment must not stop the server from starting once the row exists.
+	return errors.Join(append(errs, c.Spam.validate())...)
 }
 
 func envString(key, fallback string) string {
@@ -426,43 +429,6 @@ func loadBool(key string, dst *bool, errs *[]error) {
 		return
 	}
 	*dst = value
-}
-
-// validate reports every reason the mail settings cannot be used as written.
-// The checks only bite when mail is enabled: an unused MAIL_HOST left in a
-// shared environment file must not stop the server from starting.
-func (m Mail) validate() error {
-	if !m.Enabled {
-		return nil
-	}
-	var errs []error
-	if m.Host == "" {
-		errs = append(errs, errors.New("MAIL_HOST is required when MAIL_ENABLED=true"))
-	}
-	if m.Port <= 0 || m.Port > 65535 {
-		errs = append(errs, errors.New("MAIL_PORT must be between 1 and 65535"))
-	}
-	if m.From == "" {
-		errs = append(errs, errors.New("MAIL_FROM is required when MAIL_ENABLED=true"))
-	}
-	if !strings.Contains(m.From, "@") {
-		errs = append(errs, fmt.Errorf("MAIL_FROM %q is not an email address", m.From))
-	}
-	if m.Admin != "" && !strings.Contains(m.Admin, "@") {
-		errs = append(errs, fmt.Errorf("MAIL_ADMIN %q is not an email address", m.Admin))
-	}
-	switch m.TLS {
-	case MailTLSAuto, MailTLSStartTLS, MailTLSImplicit, MailTLSNone:
-	default:
-		errs = append(errs, fmt.Errorf("MAIL_TLS %q must be one of %s, %s, %s, %s",
-			m.TLS, MailTLSAuto, MailTLSStartTLS, MailTLSImplicit, MailTLSNone))
-	}
-	// Both halves of a login or neither: a username without a password fails
-	// at the first message, long after the operator stopped watching startup.
-	if (m.Username == "") != (m.Password == "") {
-		errs = append(errs, errors.New("MAIL_USERNAME and MAIL_PASSWORD must be set together"))
-	}
-	return errors.Join(errs...)
 }
 
 // validate reports every reason the spam settings cannot be used as written.

@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		WithClock(env.clock.Now),
 		WithIDGenerator(&seqIDs{}),
 		WithAuditor(env.trail),
-		WithAuditReader(env.trail),
+		WithAuditStore(env.trail),
 		WithPasswordCost(1000),
 		WithSessionTTL(time.Hour),
 	)
@@ -643,6 +644,60 @@ func TestAuditTrailListing(t *testing.T) {
 	}
 }
 
+func TestDeleteAuditLogs(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newTestEnv(t)
+	ada := env.mustCreate(t, "ada")
+
+	if _, _, _, err := env.svc.Login(ctx, LoginInput{Username: "ada", Password: testPassword}); err != nil {
+		t.Fatalf("Login() error = %v", err)
+	}
+	entries, _, err := env.svc.ListAuditLogs(ctx, audit.Query{Limit: 10, Action: actionLogin})
+	if err != nil {
+		t.Fatalf("ListAuditLogs() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("login entries = %d, want 1", len(entries))
+	}
+
+	// The same id twice is one row. A double click or a duplicated hidden
+	// field must not turn into "deleted 2" in the trail.
+	removed, err := env.svc.DeleteAuditLogs(ctx, []string{entries[0].ID, entries[0].ID, " "}, actorOf(ada))
+	if err != nil {
+		t.Fatalf("DeleteAuditLogs() error = %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	if rest, _, err := env.svc.ListAuditLogs(ctx, audit.Query{Limit: 10, Action: actionLogin}); err != nil {
+		t.Fatalf("ListAuditLogs() after delete error = %v", err)
+	} else if len(rest) != 0 {
+		t.Errorf("login entries after delete = %d, want 0", len(rest))
+	}
+
+	// Shortening the trail is itself an event, with both numbers an auditor
+	// needs: what was asked for and what actually went away.
+	purges := env.trail.eventsByAction(actionAuditDelete)
+	if len(purges) != 1 {
+		t.Fatalf("audit.delete events = %d, want 1", len(purges))
+	}
+	if got := fmt.Sprint(purges[0].Detail["affected"]); got != "1" {
+		t.Errorf("detail.affected = %v, want 1", got)
+	}
+
+	if _, err := env.svc.DeleteAuditLogs(ctx, nil, actorOf(ada)); !errors.Is(err, apperr.ErrInvalid) {
+		t.Errorf("DeleteAuditLogs(nil) error = %v, want a validation error", err)
+	}
+	tooMany := make([]string, maxAuditDeleteIDs+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("audit-%03d", i)
+	}
+	if _, err := env.svc.DeleteAuditLogs(ctx, tooMany, actorOf(ada)); !errors.Is(err, apperr.ErrInvalid) {
+		t.Errorf("DeleteAuditLogs(over limit) error = %v, want a validation error", err)
+	}
+}
+
 func TestInitialCredential(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -672,32 +727,5 @@ func TestInitialCredential(t *testing.T) {
 	username, password, ok, err = env.svc.InitialCredential(ctx, "grace")
 	if err != nil || !ok || username != "grace" || password != testPassword {
 		t.Errorf("InitialCredential(grace) = %q, %q, %v, %v; want grace", username, password, ok, err)
-	}
-}
-
-func TestMailPreferencesDefaultOffAndPersist(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	env := newTestEnv(t)
-
-	// A fresh deployment sends nothing until somebody turns a switch on.
-	prefs, err := env.svc.MailPreferences(ctx)
-	if err != nil {
-		t.Fatalf("MailPreferences() error = %v", err)
-	}
-	if prefs.ReplyNotify || prefs.AdminNotify {
-		t.Errorf("prefs = %+v, want both off by default", prefs)
-	}
-
-	actor := systemActor()
-	if err := env.svc.SetMailPreferences(ctx, MailPreferences{ReplyNotify: true}, actor); err != nil {
-		t.Fatalf("SetMailPreferences() error = %v", err)
-	}
-	prefs, err = env.svc.MailPreferences(ctx)
-	if err != nil {
-		t.Fatalf("MailPreferences() error = %v", err)
-	}
-	if !prefs.ReplyNotify || prefs.AdminNotify {
-		t.Errorf("prefs = %+v, want only reply notify on", prefs)
 	}
 }

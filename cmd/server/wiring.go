@@ -18,28 +18,12 @@ const notificationDrainTimeout = 5 * time.Second
 
 // newMailQueue builds the outbound queue and the function that drains it.
 //
-// The queue always exists, but it only talks to SMTP when mail is enabled: a
-// caller never has to test for nil, and a disabled deployment still has the
-// same code path.
-func newMailQueue(cfg *config.Config, logger *slog.Logger) (*mail.Queue, func(), error) {
-	if !cfg.Mail.Enabled {
-		return mail.NewQueue(mail.NoopSender{}, 16, logger), func() {}, nil
-	}
-
-	sender, err := mail.NewSMTPSender(mail.SMTPConfig{
-		Host:     cfg.Mail.Host,
-		Port:     cfg.Mail.Port,
-		TLS:      cfg.Mail.TLS,
-		Username: cfg.Mail.Username,
-		Password: cfg.Mail.Password,
-		From:     cfg.Mail.From,
-		FromName: cfg.Mail.FromName,
-	})
-	if err != nil {
-		return nil, nil, err
-	}
-
-	queue := mail.NewQueue(sender, 256, logger)
+// The sender reads the settings row on every attempt, so changing the server or
+// the password on the page applies to the next message instead of the next
+// restart. The queue always exists: whether a message is sent is the settings'
+// decision, not a constructor argument.
+func newMailQueue(store *mail.Store, logger *slog.Logger) (*mail.Queue, func()) {
+	queue := mail.NewQueue(mail.NewSettingsSender(store), 256, logger)
 	closeQueue := func() {
 		ctx, cancel := context.WithTimeout(context.Background(), notificationDrainTimeout)
 		defer cancel()
@@ -47,7 +31,33 @@ func newMailQueue(cfg *config.Config, logger *slog.Logger) (*mail.Queue, func(),
 			logger.Warn("drain notification queue", slog.Any("error", err))
 		}
 	}
-	return queue, closeQueue, nil
+	return queue, closeQueue
+}
+
+// mailSeed maps the environment's MAIL_* settings onto the row the console owns.
+//
+// It runs once, on a database that has no settings row yet. After that the page
+// is the source of truth and the environment is ignored — otherwise a stale
+// MAIL_PASSWORD in a service definition would silently win over the credential
+// the operator just typed in.
+func mailSeed(cfg config.Mail) mail.Settings {
+	seed := mail.DefaultSettings()
+	seed.Host = cfg.Host
+	if cfg.Port > 0 {
+		seed.Port = cfg.Port
+	}
+	if cfg.TLS != "" {
+		seed.TLS = cfg.TLS
+	}
+	seed.Username = cfg.Username
+	seed.Password = cfg.Password
+	seed.From = cfg.From
+	seed.FromName = cfg.FromName
+	seed.AdminTo = mail.ParseRecipients(cfg.Admin)
+	// MAIL_ENABLED no longer means anything: there is no master switch any
+	// more. The notices keep the defaults (on), and what stops a seeded
+	// configuration from mailing anyone is having no SMTP account.
+	return seed
 }
 
 // newSpamModerator builds the configured filter, reporting whether one exists.

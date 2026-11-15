@@ -103,15 +103,15 @@ curl -X PATCH http://localhost:8080/api/v1/comments/<id>/status \
 │   │   ├── entity.go           # Account / Session、状态与字段不变量
 │   │   ├── password.go         # PBKDF2-HMAC-SHA256 摘要（自带 scheme/cost/salt）
 │   │   ├── token.go            # 会话 token 签发与摘要
-│   │   ├── port.go             # Repository / AuditReader
+│   │   ├── port.go             # Repository / AuditStore
 │   │   ├── service.go          # 登录、会话、账号管理、改密、引导
 │   │   ├── repo_postgres.go    # PostgreSQL 仓储适配器
 │   │   ├── migrate.go          # 内嵌并应用本模块迁移
 │   │   ├── migrations/         # 0001_admin.sql
 │   │   ├── handler_http.go     # 路由、鉴权中间件、handler
 │   │   ├── webui.go            # /admin 服务端渲染控制台（Cookie + CSRF + 静态资源）
-│   │   ├── webui_templates/    # layout 与首页/评论/账号设置/操作日志模板（内嵌进二进制）
-│   │   ├── webui_assets/css/   # bootstrap.min.css（5.3.9）+ app.css（主题覆盖）
+│   │   ├── webui_templates/    # layout 与首页/评论管理/最近活动/邮件模板（内嵌进二进制）
+│   │   ├── webui_assets/css/   # app.css：自带的设计系统（令牌 + 组件）
 │   │   ├── webui_assets/js/    # app.js（toast/贪睡/确认）+ theme.js（明暗主题）
 │   │   └── dto.go              # 请求/响应形状（不含任何密码字段）
 │   └── platform/               # 跨模块横切能力，不含业务
@@ -123,6 +123,7 @@ curl -X PATCH http://localhost:8080/api/v1/comments/<id>/status \
 │       ├── postgres/           # 连接池、Executor 接口、DSN 脱敏、迁移执行器、约束冲突判定
 │       │   └── postgrestest/   # 集成测试连开发库 + 事务回滚的助手（只被测试引用）
 │       ├── idempotency/        # 幂等键存储（表 + 迁移）
+│       ├── mail/               # 通知邮件：SMTP 客户端、设置行（表 + 迁移）、异步队列
 │       └── id/                 # 加密随机标识符
 ├── api/openapi.yaml            # API 契约
 ├── configs/.env.example        # 配置参考
@@ -254,14 +255,14 @@ cmd ──┬──▶ comment ──┬──┐
 | `GET /admin` | 首页仪表盘：待审/今日新增/已通过/垃圾四个数字、待审评论、最近活动（只列登录） |
 | `GET /admin/login` | 登录表单；同一套账号体系，失败文案不区分账号不存在/密码错 |
 | `GET /admin/comments` | 评论管理：待审/已通过/已拒绝/垃圾四个状态，支持搜索与批量操作 |
-| `GET /admin/mail` | 邮件管理：两个通知开关（存数据库）、SMTP 只读状态、测试发信 |
-| `GET /admin/audit` | 操作日志全量列表，可按 `action` 过滤（首页只显示最近 8 次登录） |
+| `GET /admin/mail` | 邮件管理：SMTP 账号、发件人与收件人、两个通知开关都可编辑（存 `mail_settings`），并可当场测试发信 |
+| `GET /admin/audit` | 最近活动：全量记录，可按 `action` 过滤，可勾选删除（首页只显示最近 8 次登录） |
 
-**导航是「首页 / 评论管理 / 邮件管理」，账号入口收在右上角头像菜单里。** 点「账号设置」打开的是当前页上的模态框（原生 `<dialog>`，不需要 Bootstrap JS），只有显示名和改密两个表单；没有账号列表、没有「新建管理员」、没有启停和删除按钮。多账号仍然可以通过 JSON API 完成，但页面上不提供——个人站点一个账号足够，每多一个账号就多一份要保护的凭据，也多一次把自己锁在外面的机会。
+**导航是「首页 / 评论管理 / 邮件管理」，账号入口收在右上角头像菜单里。** 点「账号设置」打开的是当前页上的模态框（原生 `<dialog>`，不依赖任何 JS 库），只有显示名和改密两个表单；没有账号列表、没有「新建管理员」、没有启停和删除按钮。多账号仍然可以通过 JSON API 完成，但页面上不提供——个人站点一个账号足够，每多一个账号就多一份要保护的凭据，也多一次把自己锁在外面的机会。
 
 - **与 JSON API 是两套认证**：页面用 `HttpOnly; SameSite=Strict; Path=/admin` 的 cookie，API 仍只认 `Authorization: Bearer`。这样 API 不会因为浏览器自动带 cookie 而变成 CSRF 面。
 - **CSRF 用同步令牌**：令牌放在另一个 HttpOnly cookie 里，服务端渲染进每个表单的隐藏域，POST 时常量时间比较。SameSite 是第一道防线，令牌是第二道——只靠其中任何一个都不够。
-- **样式与脚本是独立资源**：`/admin/assets/bootstrap.min.css`、`app.css`、`app.js`、`theme.js`，`//go:embed` 进二进制，URL 带内容哈希、`Cache-Control: immutable`，并提供 ETag/304。页面本身不带内联 `<style>`/`<script>`/`style=`。
+- **样式与脚本是独立资源**：`/admin/assets/app.css`、`app.js`、`theme.js`，`//go:embed` 进二进制，URL 带内容哈希、`Cache-Control: immutable`，并提供 ETag/304。页面本身不带内联 `<style>`/`<script>`/`style=`。
 - **所有页面 `no-store`**，并带 `CSP: default-src 'none'; style-src 'self'; script-src 'self'`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。删除确认从内联 `onsubmit` 移到了 `app.js`，所以不需要 `unsafe-inline`。
 - **提醒可以临时关掉**：点掉「仍在使用初始密码」后，`app.js` 写一个 `admin_snooze_initial_password` cookie（`Path=/admin; Max-Age=600; SameSite=Strict`），服务端在 10 分钟内不再渲染这条提醒（以及登录页的初始凭据提示），到期后自动恢复。
 - **表单是 POST + 303 重定向（PRG）**：刷新不会重复提交；错误用 `?err=<code>` 回到列表页，文案在服务端映射，URL 里不携带任意文本。
@@ -273,10 +274,13 @@ cmd ──┬──▶ comment ──┬──┐
 - **开发环境的登录页会显示初始凭据**：当恰好一个账号还持有初始密码、且服务运行在开发环境时，登录页顶部直接显示「账号 admin / 初始密码 astroadmin123」。这是刻意的开发便利，登录页本身是未认证页面——**不要把开发环境的控制台暴露到公网**。
 - **生产环境什么都不显示**：`APP_ENV=production` 时不预置默认账号、不写 `initial_password` 明文、登录页只给通用提示（账号由 `server admin create` 创建，忘记密码用 `server admin passwd` 重置）。
 - **改密后提醒消失**：改密会同时清掉 `initial_password` 明文与 `password_is_initial` 标记，提示和登录页的初始凭据展示一起停止。
-- **主题色是 `#37B880`**：`app.css` 顶部定义 `--console-green-50…900` 八级色深，`--console-primary` 取 500，hover/active 取 600/700，浅色底和焦点环用同一色相的 `rgb(55 184 128 / …)`。组件只引用语义变量，改主题是改这一块。Bootstrap 的 `--bs-success` 也折进同一色系，避免徽章出现第二种绿。
+- **主题色是 `#37B880`**：`app.css` 顶部定义 `--brand-50…900` 八级色深，`--primary` 取 500，hover/active 取 600/700，浅色底和焦点环用同一色相的 `rgb(55 184 128 / …)`。组件只引用语义变量，改主题是改这一块。
 - **外壳是「卡片 + 胶囊导航」**：吸顶半透明导航、圆角 16px 的卡片与面板、四张统计卡、右侧活动流。首页的四个数字（待审 / 今日新增 / 已通过 / 垃圾）来自一次 `GROUP BY status` 加一次按时间计数，没有引入图表库。
 - **最近活动只列登录**：右侧活动流显示最近 8 次 `auth.login`（用户名、IP、相对时间），「全部 →」进入按该动作过滤的日志页。审核动作仍在完整日志里，因为「谁在什么时候删了哪条评论」需要能翻历史。
-- **样式基础是 Bootstrap 5.3.9**：`bootstrap.min.css` 本地引入（MIT，不打 CDN），**没有引入 Bootstrap 的 JS**。布局、卡片、表格、表单、按钮直接用 Bootstrap 类；`app.css` 只覆盖主题蓝、品牌标、头像、toast、评论正文等 Bootstrap 没有的部分。深色模式由 `theme.js` 在渲染前写 `data-bs-theme`，跟随系统。
+- **没有 CSS 框架**：`app.css` 是一套自带的设计系统，分三层——tokens（颜色/间距/字号/圆角/动效/层级）、base（重置、排版、焦点、滚动条）、components（按钮、输入、复选框、徽章、卡片、表格、分段筛选、批量栏、toast、弹窗、空状态）。类名用 `block__element` + `is-*`，模板里没有框架类。
+- **深色模式是换令牌**：`theme.js` 在首屏前按 `prefers-color-scheme` 写 `<html data-theme="dark">`，`app.css` 只重写语义变量，组件规则不重复。
+- **动效有档位**：120ms（状态）/200ms（表面）/280ms（浮层），统一 `cubic-bezier(.2,.8,.2,1)`；`prefers-reduced-motion` 下全部压到 1ms。
+- **可访问性**：`:focus-visible` 焦点环、跳过导航链接、`aria-current`、toast 的 `aria-live`、表格表头 `scope`、图标 `aria-hidden`。
 - **可用性**：所有交互元素有 `:focus-visible` 焦点环；按钮/输入有 hover、active、disabled 状态；表头 `scope`、当前导航 `aria-current`、跳过导航链接、toast `aria-live`；尊重 `prefers-reduced-motion`。页面不加载任何外部字体、图片或脚本，CSP 仍然是 `default-src 'none'`。
 - **审核队列可以搜索**：关键词同时匹配作者名、邮箱、正文与文章 slug（`ILIKE`，`%` `_` `\` 已转义），并保留在状态切换、分页和审核动作的跳转里。搜索走的是同一份 WHERE 片段（`commentFilter`），列表和计数不会各说各话。
 - **状态标签带数量**：四个状态各显示当前筛选下的条数（一条 `GROUP BY status`），一眼能看出「队列空了」还是「被筛选藏了」。
@@ -309,23 +313,22 @@ cmd ──┬──▶ comment ──┬──┐
 | `AKISMET_SITE_URL` | 空（回落到 `SITE_URL`） | Akismet 站点地址，必须与注册时一致 |
 | `LLM_ENDPOINT` | 空 | OpenAI 兼容的 `/chat/completions` 地址；`SPAM_PROVIDER=llm` 时必填 |
 | `LLM_MODEL` / `LLM_API_KEY` | 空 | 模型名与密钥；本地模型可以不给密钥。`LLM_TIMEOUT` 默认 `15s` |
-| `MAIL_ENABLED` | `false` | 打开通知邮件。关着的时候整个通知链路不参与 |
-| `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | 空 / `587` / `auto` | SMTP 服务器；`auto` 表示 465 用隐式 TLS、其余用 STARTTLS，本地 MailHog 用 `none` |
-| `MAIL_USERNAME` / `MAIL_PASSWORD` | 空 | 必须成对设置；明文连接下 `PlainAuth` 只对 localhost 生效 |
-| `MAIL_FROM` / `MAIL_FROM_NAME` | 空 / `SITE_NAME` | 信封发件人；开启邮件时必填 |
-| `MAIL_ADMIN` | 空 | 收到「新评论」提醒的地址；留空则只发回复提醒 |
-| `MAIL_NOTIFY_REPLY` | `true` | 被回复的人是否收邮件 |
-| `SITE_NAME` / `SITE_URL` | `Astro Liomix` / 空 | 邮件标题与正文里的站点名、文章链接前缀 |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | 空 / `587` / `auto` | **只用于首次导入**：邮件设置存在 `mail_settings` 表里、由 `/admin/mail` 编辑；这组环境变量仅在表里还没有那一行时被写入一次。`MAIL_ENABLED` 已废弃（没有总开关了） |
+| `MAIL_USERNAME` / `MAIL_PASSWORD` | 空 | 同上，仅首次导入。明文连接下 `PlainAuth` 只对 localhost 生效 |
+| `MAIL_FROM` / `MAIL_FROM_NAME` | 空 / `SITE_NAME` | 同上，仅首次导入。发件人邮箱与显示名 |
+| `MAIL_ADMIN` | 空 | 同上，仅首次导入。管理员收件邮箱，多个用逗号分隔 |
+| `SITE_NAME` / `SITE_URL` | `Astro Liomix` / 空 | 邮件标题与正文里的站点名、文章链接前缀（仍来自环境变量） |
 
 ### 批量操作
 
-评论列表有批量入口（`POST /admin/comments/bulk`）：
+评论管理与最近活动都有批量入口（`POST /admin/comments/bulk`、`POST /admin/audit/bulk`）：
 
-- 复选框通过 HTML5 的 `form="..."` 属性挂在表格外的表单上，所以每行原有的「通过 / 拒绝 / 删除」单条表单不用嵌套（嵌套表单是无效 HTML）。
-- 支持 通过 / 拒绝 / 标记垃圾 / 删除（含回复）。
-- 一次最多 100 条（`comment.MaxBulkIDs`），与一页的容量一致。
+- 复选框带 `data-bulk-id`，提交时由 `app.js` 收集成本表单里的 hidden `ids`；不用 HTML5 的 `form="..."` 关联（浏览器表现不稳定），也不用嵌套表单（无效 HTML）。
+- 每个动作是一个按钮（`name="action"`），点一次就提交；删除按钮带二次确认。评论侧支持 通过 / 拒绝 / 标记垃圾 / 删除（含回复）。
+- 一次最多 100 条（`comment.MaxBulkIDs` / `admin.maxAuditDeleteIDs`），与一页的容量一致。
 - 批量审核只对**状态真正发生变化**的评论发通知：重复点「通过」不会反复给作者发信。
 - 审计只记一条 `comment.bulk.<action>`，detail 里同时记 `requested` 与 `affected`：审计要能回答「点了多少、实际改了多少」。
+- 活动记录的删除**本身也写审计**（`audit.delete`，detail 同样是 requested/affected）：把日志删短这件事，日志里得留得下痕迹。它只用于清掉误记的条目，不是保留策略——保留策略见待办。
 
 ### 反垃圾
 
@@ -338,10 +341,13 @@ cmd ──┬──▶ comment ──┬──┐
 
 ### 邮件通知
 
-- **默认不发信**：回复提醒与管理员提醒是两个开关，存在 `admin_settings` 表里，默认都关。关着的时候通过评论不会发出任何邮件。
-- 开关在 `/admin/mail` 修改，改完立即生效（`cmd/server` 的适配器每条消息前读一次），不需要重启；SMTP 凭据仍只在环境变量里。
-- 两类邮件：**被回复的人**收到回复内容与文章链接；`MAIL_ADMIN` 收到每条通过评论的提醒。
-- 打开开关后，评论通过审核时触发（不是提交时）：`internal/comment` 在 `SetStatus` / `SetStatusMany` 里调 `Notifier`。自己回复自己、或父评论没有邮箱时跳过。
+- **SMTP 配置在后台编辑**：服务器地址、端口、加密方式、用户名、密码/授权码、发件邮箱与名称、管理员收件邮箱（可多个）都存在 `mail_settings` 的单行里，页面保存即生效——`SettingsSender` 每条消息前读一次配置，改端口或换密码不需要重启。
+- **环境变量只负责首次导入**：库里还没有那一行时，`MAIL_*` 会被写进去一次；之后页面就是唯一事实来源，避免部署脚本里的旧密码悄悄覆盖后台刚改的值。
+- **密码只写不读**：页面永远拿不到已保存的密码，留空即「不修改」；审计只记 `passwordChanged: true`，不记值。
+- **邮件模板可在后台粘贴整段 HTML**（`mail_settings.template_admin` / `template_reply`）：留空用内置模板，填了整封 HTML 就换成你的。变量用 `{{siteName}} {{postSlug}} {{postURL}} {{authorName}} {{authorEmail}} {{parentAuthor}} {{body}} {{consoleURL}} {{time}}`，做的是**字符串替换**（不是 `html/template` 解析，避免模板里的 `{{` 误伤），值一律先 HTML 转义；未知变量原样保留，写错能看见。纯文本部分仍用内置文案，给不显示 HTML 的客户端兜底。
+- **两个通知开关，默认都开**：新评论提醒管理员（发到收件邮箱列表）、回复提醒被回复者。没有总开关——取消勾选就是关掉那一类邮件。评论**通过审核**那刻才发信，待审和拒收不发。
+- **测试发信是同步的**：走已保存的设置真连一次，失败直接把错误显示在页面上，而不是塞进队列报个「已发送」。
+- 自己回复自己、或父评论没留邮箱时跳过；每封邮件都带文章链接。
 - 发送是**异步队列**（`internal/platform/mail`，容量 256）：入队不阻塞请求，队列满就丢弃并记 warning；进程退出时最多等 5 秒把队列发完。SMTP 有连接/写超时，邮件服务器挂住不会拖住评论接口。
 
 ### 数据库
@@ -368,7 +374,7 @@ cmd ──┬──▶ comment ──┬──┐
 - `admin_sessions.token_hash` 是唯一索引，也是每次鉴权的唯一一次查询；库里不存明文 token，所以数据库被拖走也不能拿来当会话用。
 - `admin_accounts.username` 有 `CHECK` 钉住小写与字符集，另有唯一索引：服务层的校验被脚本绕过时，数据库仍然拒绝第二个同名账号。`password_hash` 的 `CHECK` 只校验编码形状，不校验内容——内容由 PBKDF2 保证。
 - `expires_at` 是绝对时间，配一条 `CHECK (expires_at > created_at)`；启动时按 `expires_at` 清一次过期会话。已撤销的行留到过期才删，因为审计日志还要能点名是哪个会话做的操作。
-- `audit_logs` 是 append-only：`actor_id` 故意**不建外键**（账号删了，历史还要能读），`actor_name` 存当时的用户名快照，`detail` 用 `jsonb` 以便 `detail->>'status'` 这类查询。三个索引分别服务「全量倒序」「按 action 过滤」「按 actor 过滤」。
+- `audit_logs` 只追加、不修改：`actor_id` 故意**不建外键**（账号删了，历史还要能读），`actor_name` 存当时的用户名快照，`detail` 用 `jsonb` 以便 `detail->>'status'` 这类查询。三个索引分别服务「全量倒序」「按 action 过滤」「按 actor 过滤」。控制台能删掉勾选的条目（误记清理），每次删除都追加一条 `audit.delete`。
 - 审计写入是尽力而为：写失败只记一条 warning，不让「审计表满了」把审核动作变成 500。
 - `admin_accounts.initial_password` 是唯一保存明文密码的地方，用途只有一个：开发环境的登录页展示初始凭据。账号自己改密会把它清空，管理员重置会写入新值；**只有开发环境会写它**（`WithPlaintextInitialPassword`），生产始终为 NULL。它是登记在案的安全取舍：在那段时间里，任何能打开登录页或读到库的人都能拿到这个密码。
 
@@ -429,7 +435,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - 请求体读取与解码统一走 `platform/httpkit.ReadBody` / `DecodeJSON`（18.3）：体积上限、`Content-Type` 校验、忽略未知字段、拒尾随数据，模块不再各写一份
 - 构造函数 fail fast + functional options（9.2）；时钟、随机源、日志器全部可注入（16）
 - `context` 首参贯穿阻塞操作（11）；HTTP 服务端显式超时 + 优雅停机（18.5）
-- 认证与授权：不透明会话 token + 摘要存储（可撤销），登录失败不区分原因；特权操作写审计，审计表 append-only 且容忍写入失败
+- 认证与授权：不透明会话 token + 摘要存储（可撤销），登录失败不区分原因；特权操作写审计，审计表只追加、容忍写入失败，删记录也留痕
 - 库表、索引、事务与迁移按 `docs/PostgreSQL规范.md`：`timestamptz` / `text` + `CHECK` / 外键列手工建索引 / 迁移一文件一事务且带 `lock_timeout`
 
 ### 规范例外
@@ -448,7 +454,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - [ ] 审核辅助：待审列表分页、spam 自动判定（`Moderator` 接口已留好插槽）
 - [ ] 限流：发评论、读计数、**管理员登录**都还没有速率限制，公开接口可能被刷（要按端点分级，且计数在多实例下需要共享存储；进程内桶只会在单实例时看起来有效）
 - [ ] 幂等键的清理目前只在启动时 `Prune` 一次，长期运行应改成定时任务（`idempotency_keys` 只增不减）
-- [ ] 管理员会话清理同样只在启动时跑一次；审计日志 `audit_logs` 还没有保留策略，只增不减
+- [ ] 管理员会话清理同样只在启动时跑一次；审计日志 `audit_logs` 还没有保留策略（目前只有控制台里手动勾选删除）
 - [ ] 多角色 RBAC：现在刻意是**单角色**——每个管理员都能审核、管账号、读审计，靠「不能动自己 / 不能动最后一个」兜底。需要分级时再加角色与权限点
 - [ ] `/readyz` 目前只看进程存活，应加一次数据库 ping
 - [ ] 已有三个领域模块，`comment`、`count`、`admin` 按 2.3 评估是否拆子包

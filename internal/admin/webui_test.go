@@ -611,28 +611,40 @@ func TestConsoleRequiresModerationForCommentPages(t *testing.T) {
 }
 
 // TestConsoleShowsInitialPasswordReminder is the first-run nudge: an account
-// created by the CLI still holds a generated password, and the console says so
-// above every page until it is changed.
+// created by the CLI still holds a generated password, and the dashboard says
+// so.
+//
+// It lives on the dashboard only. Following the operator into every form turned
+// a reminder into a popup that came back on every reload, which is how a
+// security nudge gets ignored.
 func TestConsoleShowsInitialPasswordReminder(t *testing.T) {
 	t.Parallel()
 	c := newConsole(t)
 	c.login(t)
 
-	for _, path := range []string{"/admin", "/admin/comments", "/admin/profile", "/admin/audit"} {
-		status, body := c.get(t, path)
-		if status != http.StatusOK {
-			t.Fatalf("%s = %d, want 200", path, status)
+	status, body := c.get(t, "/admin")
+	if status != http.StatusOK {
+		t.Fatalf("/admin = %d, want 200", status)
+	}
+	if !strings.Contains(body, "仍在使用初始密码") {
+		t.Error("the dashboard does not carry the initial-password reminder")
+	}
+	if !strings.Contains(body, "去修改") {
+		t.Error("the reminder has no link to the account settings")
+	}
+	// It is a toast fixed to the top centre of the viewport, not an inline
+	// banner inside the page body.
+	if !strings.Contains(body, `class="toasts"`) {
+		t.Error("the page has no toast container")
+	}
+
+	for _, path := range []string{"/admin/comments", "/admin/audit"} {
+		pageStatus, page := c.get(t, path)
+		if pageStatus != http.StatusOK {
+			t.Fatalf("%s = %d, want 200", path, pageStatus)
 		}
-		if !strings.Contains(body, "仍在使用初始密码") {
-			t.Errorf("%s does not carry the initial-password reminder", path)
-		}
-		if !strings.Contains(body, "去修改") {
-			t.Errorf("%s reminder has no link to the account page", path)
-		}
-		// The reminder is a toast fixed to the top centre of the viewport, not
-		// an inline banner inside the page body.
-		if !strings.Contains(body, `class="console-toasts"`) {
-			t.Errorf("%s has no toast container", path)
+		if strings.Contains(page, "仍在使用初始密码") {
+			t.Errorf("%s still carries the reminder; it belongs on the dashboard", path)
 		}
 	}
 }
@@ -824,8 +836,7 @@ func TestConsoleServesEmbeddedAssets(t *testing.T) {
 		ctype  string
 		marker string
 	}{
-		{"/admin/assets/bootstrap.min.css", "text/css", "Bootstrap  v5.3.9"},
-		{"/admin/assets/app.css", "text/css", "--console-primary"},
+		{"/admin/assets/app.css", "text/css", "--brand-500"},
 		{"/admin/assets/app.js", "text/javascript", "admin_snooze_initial_password"},
 		{"/admin/assets/theme.js", "text/javascript", "prefers-color-scheme: dark"},
 	}
@@ -894,8 +905,8 @@ func TestConsoleCSPUsesSelfHostedAssets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read login: %v", err)
 	}
-	if !strings.Contains(string(body), `/admin/assets/bootstrap.min.css?v=`) {
-		t.Error("the page does not link the vendored Bootstrap stylesheet")
+	if strings.Contains(string(body), "bootstrap") {
+		t.Error("the page still references Bootstrap")
 	}
 	if !strings.Contains(string(body), `/admin/assets/app.css?v=`) {
 		t.Error("the page does not link the versioned theme stylesheet")
@@ -910,7 +921,7 @@ func TestConsoleReminderSnoozesForTenMinutes(t *testing.T) {
 	c := newConsole(t)
 	c.login(t)
 
-	if _, body := c.get(t, "/admin/comments"); !strings.Contains(body, "仍在使用初始密码") {
+	if _, body := c.get(t, "/admin"); !strings.Contains(body, "仍在使用初始密码") {
 		t.Fatal("the reminder is missing before it is dismissed")
 	}
 
@@ -919,14 +930,14 @@ func TestConsoleReminderSnoozesForTenMinutes(t *testing.T) {
 		t.Fatalf("parse server URL: %v", err)
 	}
 	c.jar.SetCookies(parsed, []*http.Cookie{{Name: snoozeCookieName, Value: "1", Path: "/admin"}})
-	if _, body := c.get(t, "/admin/comments"); strings.Contains(body, "仍在使用初始密码") {
+	if _, body := c.get(t, "/admin"); strings.Contains(body, "仍在使用初始密码") {
 		t.Error("the reminder ignored the snooze cookie")
 	}
 
 	// Clearing the cookie brings it back, which is what happens when the
 	// ten-minute window ends.
 	c.jar.SetCookies(parsed, []*http.Cookie{{Name: snoozeCookieName, Value: "", Path: "/admin", MaxAge: -1}})
-	if _, body := c.get(t, "/admin/comments"); !strings.Contains(body, "仍在使用初始密码") {
+	if _, body := c.get(t, "/admin"); !strings.Contains(body, "仍在使用初始密码") {
 		t.Error("the reminder did not return after the snooze was cleared")
 	}
 }
@@ -982,6 +993,22 @@ func TestConsoleBulkModeration(t *testing.T) {
 	c := newConsole(t)
 	c.login(t)
 
+	// Each action is a button, so a batch is one click rather than "pick from
+	// a dropdown, then press go". The queue used to hide delete in a <select>,
+	// which is why it read as missing.
+	pageStatus, pageBody := c.get(t, "/admin/comments?status=pending")
+	if pageStatus != http.StatusOK {
+		t.Fatalf("GET /admin/comments = %d, want 200", pageStatus)
+	}
+	for _, want := range []string{`value="approve"`, `value="reject"`, `value="spam"`, `value="delete"`} {
+		if !strings.Contains(pageBody, want) {
+			t.Errorf("the bulk bar has no button for %s", want)
+		}
+	}
+	if strings.Contains(pageBody, "<select") {
+		t.Error("the bulk bar still asks for the action in a dropdown")
+	}
+
 	status, location, body := c.post(t, "/admin/comments/bulk", url.Values{
 		"csrf":   {c.csrf(t)},
 		"return": {"pending"},
@@ -1029,26 +1056,120 @@ func TestConsoleBulkRejectsEmptySelection(t *testing.T) {
 	}
 }
 
-// fakeMail is the mail subsystem as the console sees it, without SMTP.
-type fakeMail struct {
-	mu      sync.Mutex
-	enabled bool
-	sent    []string
+func TestConsoleDeletesActivity(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	status, body := c.get(t, "/admin/audit")
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin/audit = %d, want 200", status)
+	}
+	if !strings.Contains(body, "最近活动") {
+		t.Error("the activity page does not use its own name")
+	}
+	if strings.Contains(body, "操作日志") {
+		t.Error("the activity page still calls itself 操作日志")
+	}
+	for _, want := range []string{`data-bulk-all="audit-bulk"`, `value="delete"`, "删除选中"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the activity page is missing %q; bulk delete has no control", want)
+		}
+	}
+
+	logins := c.env.trail.eventsByAction(actionLogin)
+	if len(logins) != 1 {
+		t.Fatalf("login events = %d, want 1", len(logins))
+	}
+
+	status, location, postBody := c.post(t, "/admin/audit/bulk", url.Values{
+		"csrf":   {c.csrf(t)},
+		"return": {"auth.login"},
+		"action": {"delete"},
+		"ids":    {logins[0].ID},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("bulk delete = %d, want 303 (body: %s)", status, postBody)
+	}
+	if !strings.Contains(location, "msg=activity_deleted") {
+		t.Errorf("Location = %q, want the deletion confirmation", location)
+	}
+	// The filter the operator was reading comes back with them.
+	if !strings.Contains(location, "action=auth.login") {
+		t.Errorf("Location = %q, want the action filter preserved", location)
+	}
+
+	if rest := c.env.trail.eventsByAction(actionLogin); len(rest) != 0 {
+		t.Errorf("login events after delete = %d, want 0", len(rest))
+	}
+	purges := c.env.trail.eventsByAction(actionAuditDelete)
+	if len(purges) != 1 {
+		t.Fatalf("audit.delete events = %d, want 1", len(purges))
+	}
+	if purges[0].Actor.Name != "owner" {
+		t.Errorf("audit.delete actor = %q, want the signed-in account", purges[0].Actor.Name)
+	}
 }
 
-func (f *fakeMail) Info() MailInfo {
-	return MailInfo{Enabled: f.enabled, Host: "smtp.example.com", Port: 587, TLS: "starttls",
-		From: "blog@example.com", Admin: "owner@example.com"}
+func TestConsoleBulkDeleteNeedsSelection(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	before := len(c.env.trail.eventsByAction(actionLogin))
+	status, location, body := c.post(t, "/admin/audit/bulk", url.Values{
+		"csrf":   {c.csrf(t)},
+		"action": {"delete"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("bulk delete with no ids = %d, want 303 (body: %s)", status, body)
+	}
+	if !strings.Contains(location, "err=no_selection") {
+		t.Errorf("Location = %q, want the empty-selection code", location)
+	}
+	if after := len(c.env.trail.eventsByAction(actionLogin)); after != before {
+		t.Errorf("login events = %d after an empty selection, want %d", after, before)
+	}
 }
 
-func (f *fakeMail) SendTest(_ context.Context, to string) error {
+// fakeMailService is the mail subsystem as the console sees it: one settings
+// value in memory and a record of what was sent.
+type fakeMailService struct {
+	mu       sync.Mutex
+	settings MailSettings
+	sent     []string
+	// failWith is returned by SaveSettings when set, so the page's rejection
+	// path can be exercised without a database.
+	failWith error
+}
+
+var _ MailService = (*fakeMailService)(nil)
+
+func (f *fakeMailService) Settings(context.Context) (MailSettings, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.settings, nil
+}
+
+func (f *fakeMailService) SaveSettings(_ context.Context, in MailSettings) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failWith != nil {
+		return f.failWith
+	}
+	in.HasPassword = in.Password != ""
+	f.settings = in
+	return nil
+}
+
+func (f *fakeMailService) SendTest(_ context.Context, to string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, to)
 	return nil
 }
 
-func (f *fakeMail) sentTo() []string {
+func (f *fakeMailService) sentTo() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]string, len(f.sent))
@@ -1056,22 +1177,25 @@ func (f *fakeMail) sentTo() []string {
 	return out
 }
 
-func TestConsoleMailPageAndSwitches(t *testing.T) {
-	t.Parallel()
+func (f *fakeMailService) saved() MailSettings {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.settings
+}
+
+// newConsoleWithMail starts the console with a mail service wired in.
+func newConsoleWithMail(t *testing.T, mailer MailService) *console {
+	t.Helper()
 
 	env := newTestEnv(t)
 	if _, err := env.svc.Bootstrap(t.Context(), "owner", "Owner", testPassword); err != nil {
 		t.Fatalf("Bootstrap() error = %v", err)
 	}
-	mailer := &fakeMail{enabled: true}
 	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
-		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{
-			Auditor: env.trail,
-			Mail:    mailer,
-		})
+		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{Auditor: env.trail, Mail: mailer})
 	})
 	server := httptest.NewServer(router)
-	defer server.Close()
+	t.Cleanup(server.Close)
 
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -1084,88 +1208,138 @@ func TestConsoleMailPageAndSwitches(t *testing.T) {
 		env:    env,
 	}
 	c.login(t)
+	return c
+}
+
+func TestConsoleMailSettingsSave(t *testing.T) {
+	t.Parallel()
+	mailer := &fakeMailService{}
+	c := newConsoleWithMail(t, mailer)
 
 	status, body := c.get(t, "/admin/mail")
 	if status != http.StatusOK {
-		t.Fatalf("mail page = %d, want 200", status)
+		t.Fatalf("GET /admin/mail = %d, want 200", status)
 	}
-	if !strings.Contains(body, "通知开关") || !strings.Contains(body, "smtp.example.com") {
-		t.Error("the mail page does not show the switches and the SMTP configuration")
-	}
-	if !strings.Contains(body, "邮件管理") {
-		t.Error("the nav does not offer the mail page")
+	for _, want := range []string{"SMTP 服务器", "通知开关", `action="/admin/mail"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the mail page is missing %q", want)
+		}
 	}
 
 	status, location, body := c.post(t, "/admin/mail", url.Values{
-		"csrf":        {c.csrf(t)},
-		"replyNotify": {"on"},
+		"csrf":          {c.csrf(t)},
+		"host":          {"smtp.qq.com"},
+		"port":          {"465"},
+		"tls":           {"implicit"},
+		"username":      {"blog@qq.com"},
+		"password":      {"app-token"},
+		"from":          {"blog@qq.com"},
+		"fromName":      {"Astro Liomix"},
+		"adminTo":       {"owner@example.com, second@example.com"},
+		"replyNotify":   {"on"},
+		"templateAdmin": {"<html><body>{{authorName}} 在 {{postSlug}} 留言</body></html>"},
 	})
 	if status != http.StatusSeeOther {
-		t.Fatalf("mail save = %d, want 303 (body: %s)", status, body)
+		t.Fatalf("save = %d, want 303 (body: %s)", status, body)
 	}
-	if location != "/admin/mail?msg=mail_saved" {
+	if !strings.Contains(location, "msg=mail_saved") {
 		t.Errorf("Location = %q, want the saved notice", location)
 	}
-	prefs, err := env.svc.MailPreferences(t.Context())
-	if err != nil {
-		t.Fatalf("MailPreferences() error = %v", err)
+
+	saved := mailer.saved()
+	if saved.Host != "smtp.qq.com" || saved.Port != 465 || saved.TLS != "implicit" {
+		t.Errorf("saved = %+v, want the submitted server settings", saved)
 	}
-	if !prefs.ReplyNotify || prefs.AdminNotify {
-		t.Errorf("prefs = %+v, want only the reply switch on", prefs)
+	if len(saved.AdminTo) != 2 || saved.AdminTo[1] != "second@example.com" {
+		t.Errorf("adminTo = %v, want both addresses split apart", saved.AdminTo)
 	}
-	// Turning a switch on or off is a privileged action and is recorded.
-	if events := env.trail.eventsByAction("settings.mail"); len(events) != 1 {
-		t.Errorf("settings.mail events = %d, want 1", len(events))
+	if !saved.ReplyNotify || saved.AdminNotify {
+		t.Errorf("switches = %+v, want only the reply notice on", saved)
+	}
+	if !strings.Contains(saved.TemplateAdmin, "{{authorName}}") {
+		t.Errorf("templateAdmin = %q, want the pasted document", saved.TemplateAdmin)
 	}
 
-	status, location, _ = c.post(t, "/admin/mail/test", url.Values{
-		"csrf": {c.csrf(t)},
-		"to":   {"reader@example.com"},
-	})
-	if status != http.StatusSeeOther || !strings.Contains(location, "mail_test_sent") {
-		t.Errorf("test send = %d %q, want a redirect to the sent notice", status, location)
+	// A full save is one audited action, and the trail never carries the
+	// credential.
+	events := c.env.trail.eventsByAction("settings.mail")
+	if len(events) != 1 {
+		t.Fatalf("settings.mail events = %d, want 1", len(events))
 	}
-	if got := mailer.sentTo(); len(got) != 1 || got[0] != "reader@example.com" {
-		t.Errorf("sent = %v, want one message to the requested address", got)
+	if got := fmt.Sprint(events[0].Detail["passwordChanged"]); got != "true" {
+		t.Errorf("detail.passwordChanged = %v, want true", got)
+	}
+	if _, leaked := events[0].Detail["password"]; leaked {
+		t.Error("the audit detail contains the SMTP password")
 	}
 }
 
-func TestConsoleMailPageWhenSMTPServerIsOff(t *testing.T) {
+func TestConsoleMailSaveKeepsValuesOnRejection(t *testing.T) {
 	t.Parallel()
+	mailer := &fakeMailService{failWith: &apperr.ValidationError{
+		Field: "from", Code: apperr.FieldInvalid, Message: "is not an email address",
+	}}
+	c := newConsoleWithMail(t, mailer)
 
-	env := newTestEnv(t)
-	if _, err := env.svc.Bootstrap(t.Context(), "owner", "Owner", testPassword); err != nil {
-		t.Fatalf("Bootstrap() error = %v", err)
-	}
-	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
-		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{
-			Auditor: env.trail,
-			Mail:    &fakeMail{},
-		})
+	status, _, body := c.post(t, "/admin/mail", url.Values{
+		"csrf": {c.csrf(t)},
+		"host": {"smtp.qq.com"},
+		"port": {"587"},
+		"tls":  {"auto"},
+		"from": {"not-an-address"},
 	})
-	server := httptest.NewServer(router)
-	defer server.Close()
+	if status != http.StatusBadRequest {
+		t.Fatalf("rejected save = %d, want 400 (body: %s)", status, body)
+	}
+	if !strings.Contains(body, "发件邮箱") {
+		t.Error("the page does not name the field that was refused")
+	}
+	// The rest of the form survives: retyping the server for one bad address is
+	// what makes a settings page feel broken.
+	if !strings.Contains(body, `value="smtp.qq.com"`) {
+		t.Error("the rejected form lost the server address that was typed")
+	}
+}
 
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("create cookie jar: %v", err)
-	}
-	c := &console{
-		server: server,
-		client: &http.Client{Jar: jar, Timeout: 5 * time.Second},
-		jar:    jar,
-		env:    env,
-	}
-	c.login(t)
+func TestConsoleMailSaveRejectsNonNumericPort(t *testing.T) {
+	t.Parallel()
+	c := newConsoleWithMail(t, &fakeMailService{})
 
-	status, body := c.get(t, "/admin/mail")
-	if status != http.StatusOK {
-		t.Fatalf("mail page = %d, want 200", status)
+	status, _, body := c.post(t, "/admin/mail", url.Values{
+		"csrf": {c.csrf(t)},
+		"port": {"５８７"},
+		"tls":  {"auto"},
+	})
+	if status != http.StatusBadRequest {
+		t.Fatalf("bad port = %d, want 400 (body: %s)", status, body)
 	}
-	if !strings.Contains(body, "SMTP 未配置") {
-		t.Error("the page does not say that SMTP is off")
+	if !strings.Contains(body, "端口要填数字") {
+		t.Error("the page does not explain the port problem")
 	}
-	if strings.Contains(body, `type="submit" >发送测试`) {
-		t.Error("the test button is enabled without an SMTP server")
+}
+
+func TestConsoleMailTestUsesTheTypedAddress(t *testing.T) {
+	t.Parallel()
+	// The admin recipients are a different list. A test message must go to the
+	// address in its own field and nowhere else.
+	mailer := &fakeMailService{settings: MailSettings{
+		Host: "smtp.qq.com", Port: 465, TLS: "implicit",
+		From: "sender@qq.com", AdminTo: []string{"admin@example.com"},
+	}}
+	c := newConsoleWithMail(t, mailer)
+
+	status, location, body := c.post(t, "/admin/mail/test", url.Values{
+		"csrf": {c.csrf(t)},
+		"to":   {"2055314849@qq.com"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("test send = %d, want 303 (body: %s)", status, body)
+	}
+	if !strings.Contains(location, "msg=mail_test_sent") {
+		t.Errorf("Location = %q, want the sent notice", location)
+	}
+	sent := mailer.sentTo()
+	if len(sent) != 1 || sent[0] != "2055314849@qq.com" {
+		t.Errorf("sent to %v, want only the address that was typed", sent)
 	}
 }

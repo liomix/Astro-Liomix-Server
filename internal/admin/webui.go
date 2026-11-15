@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -33,18 +34,17 @@ import (
 //go:embed webui_templates/*.html
 var webUITemplates embed.FS
 
-//go:embed webui_assets/css/bootstrap.min.css webui_assets/css/app.css webui_assets/js/app.js webui_assets/js/theme.js
+//go:embed webui_assets/css/app.css webui_assets/js/app.js webui_assets/js/theme.js
 var webUIAssets embed.FS
 
 // Console assets are embedded and served with an immutable cache policy: the
 // URL carries a content hash, so a deploy that changes the CSS changes the URL
 // and no browser can pair new markup with old styles.
 var (
-	bootstrapCSS        = mustAsset("webui_assets/css/bootstrap.min.css")
 	consoleCSS          = mustAsset("webui_assets/css/app.css")
 	consoleJS           = mustAsset("webui_assets/js/app.js")
 	consoleThemeJS      = mustAsset("webui_assets/js/theme.js")
-	consoleAssetVersion = assetHash(bootstrapCSS, consoleCSS, consoleJS, consoleThemeJS)
+	consoleAssetVersion = assetHash(consoleCSS, consoleJS, consoleThemeJS)
 )
 
 // Cookie and form names used by the console. They are unexported because no
@@ -124,10 +124,8 @@ type pageData struct {
 	// mail service, not whether SMTP is configured: an operator still needs
 	// the page to see that it is off.
 	HasMail bool
-	// Mail is the configuration snapshot shown on the mail page.
-	Mail MailInfo
-	// MailPrefs are the two notification switches.
-	MailPrefs MailPreferences
+	// Mail is the outbound-mail configuration shown on the settings page.
+	Mail MailSettings
 	// NoAccounts is set on the login page when the account table is empty. A
 	// form that always answers "wrong password" would send a new operator
 	// looking for a typo instead of telling them to create the account.
@@ -208,7 +206,6 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 		mail:                     cfg.Mail,
 	}
 
-	mux.HandleFunc("GET /admin/assets/bootstrap.min.css", u.asset(bootstrapCSS, "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin/assets/app.css", u.asset(consoleCSS, "text/css; charset=utf-8"))
 	mux.HandleFunc("GET /admin/assets/app.js", u.asset(consoleJS, "text/javascript; charset=utf-8"))
 	mux.HandleFunc("GET /admin/assets/theme.js", u.asset(consoleThemeJS, "text/javascript; charset=utf-8"))
@@ -236,6 +233,7 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 	})
 
 	mux.HandleFunc("GET /admin/audit", u.withSession(u.auditPage))
+	mux.HandleFunc("POST /admin/audit/bulk", u.withSession(u.auditBulk))
 	if cfg.Mail != nil {
 		mux.HandleFunc("GET /admin/mail", u.withSession(u.mailPage))
 		mux.HandleFunc("POST /admin/mail", u.withSession(u.mailSave))
@@ -638,74 +636,181 @@ func (u *webUI) profilePassword(w http.ResponseWriter, r *http.Request, p *Princ
 	u.redirect(w, r, "/admin/login?msg=password_changed")
 }
 
-// mailPage shows the outbound mail configuration and the two switches the
-// console owns.
+// mailPage shows the outbound-mail settings. Everything on it is editable: the
+// SMTP account, the sender, the recipients and the two notices. A deployment
+// that configured mail through the environment has those values imported once
+// at startup, and the page owns them afterwards.
 func (u *webUI) mailPage(w http.ResponseWriter, r *http.Request, p *Principal) {
-	info := u.mail.Info()
-	prefs, err := u.svc.MailPreferences(r.Context())
+	settings, err := u.mail.Settings(r.Context())
 	if err != nil {
-		u.logger.WarnContext(r.Context(), "read mail preferences", slog.Any("error", err))
+		u.logger.ErrorContext(r.Context(), "read mail settings", slog.Any("error", err))
+		settings = MailSettings{Port: 587, TLS: "auto"}
 	}
 	flash, errText := u.notices(r)
 	u.render(w, http.StatusOK, "mail", pageData{
 		Title: "邮件管理", Nav: "mail", Account: p.Account,
 		CSRFToken: u.csrfToken(w, r),
 		Flash:     flash, Error: errText,
-		Mail: info, MailPrefs: prefs,
+		Mail: settings,
 	})
 }
 
-// mailSave stores the notification switches.
+// mailSave stores the whole configuration, including the SMTP credential.
+//
+// The password field is write-only: the page never receives the stored value,
+// so an empty box means "keep it" rather than "erase it", and clearing it has
+// to be a deliberate act on the field itself.
 func (u *webUI) mailSave(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !u.parseForm(w, r) || !u.csrfOK(r) {
 		u.redirect(w, r, "/admin/mail?err=csrf")
 		return
 	}
-	prefs := MailPreferences{
+	// The stored password is fetched only to keep the page's "已保存" hint
+	// truthful when a save is rejected and the form is rendered again.
+	stored, _ := u.mail.Settings(r.Context())
+
+	port, portErr := strconv.Atoi(strings.TrimSpace(r.PostFormValue("port")))
+	in := MailSettings{
+		Host:        strings.TrimSpace(r.PostFormValue("host")),
+		Port:        port,
+		TLS:         strings.TrimSpace(r.PostFormValue("tls")),
+		Username:    strings.TrimSpace(r.PostFormValue("username")),
+		Password:    r.PostFormValue("password"),
+		HasPassword: stored.HasPassword && r.PostFormValue("password") == "",
+		From:        strings.TrimSpace(r.PostFormValue("from")),
+		FromName:    strings.TrimSpace(r.PostFormValue("fromName")),
+		AdminTo:     splitRecipients(r.PostFormValue("adminTo")),
 		ReplyNotify: r.PostFormValue("replyNotify") != "",
 		AdminNotify: r.PostFormValue("adminNotify") != "",
+		// Whole documents: trim the pasted edges, keep every byte inside.
+		TemplateAdmin: strings.TrimSpace(r.PostFormValue("templateAdmin")),
+		TemplateReply: strings.TrimSpace(r.PostFormValue("templateReply")),
 	}
-	if err := u.svc.SetMailPreferences(r.Context(), prefs, u.actor(r, p)); err != nil {
-		u.redirect(w, r, "/admin/mail?err=error")
+	if portErr != nil {
+		// A rejected save re-renders the form with what was typed. Throwing the
+		// operator back to an empty page over a typo is how "it won't save"
+		// happens.
+		u.mailFormError(w, r, p, in, "端口要填数字，通常是 465（SSL）或 587（STARTTLS）。")
 		return
 	}
+	if err := u.mail.SaveSettings(r.Context(), in); err != nil {
+		u.logger.WarnContext(r.Context(), "save mail settings", slog.Any("error", err))
+		u.mailFormError(w, r, p, in, mailValidationText(err))
+		return
+	}
+	// The credential is never written to the trail; what an auditor needs is
+	// that it changed, not what it became.
+	u.record(r, p, actionSettingsUpdate, "settings", "mail", map[string]any{
+		"host":            in.Host,
+		"port":            in.Port,
+		"tls":             in.TLS,
+		"from":            in.From,
+		"adminTo":         in.AdminTo,
+		"replyNotify":     in.ReplyNotify,
+		"adminNotify":     in.AdminNotify,
+		"passwordChanged": in.Password != "",
+	})
 	u.redirect(w, r, "/admin/mail?msg=mail_saved")
 }
 
-// mailTest sends one message so the SMTP settings can be checked on demand.
+// mailFormError renders the settings form again with the submitted values and
+// the reason they were refused, so a typo never costs the operator the rest of
+// the form.
+func (u *webUI) mailFormError(w http.ResponseWriter, r *http.Request, p *Principal, in MailSettings, message string) {
+	u.render(w, http.StatusBadRequest, "mail", pageData{
+		Title: "邮件管理", Nav: "mail", Account: p.Account,
+		CSRFToken: u.csrfToken(w, r),
+		Error:     message,
+		Mail:      in,
+	})
+}
+
+// mailValidationText names the field that was refused. The mail package speaks
+// field codes, not Chinese, so the wording lives here.
+func mailValidationText(err error) string {
+	labels := map[string]string{
+		"host":     "服务器地址",
+		"port":     "端口",
+		"tls":      "加密方式",
+		"from":     "发件邮箱",
+		"adminTo":  "管理员收件邮箱",
+		"username": "用户名",
+	}
+	for _, field := range apperr.Fields(err) {
+		if label, ok := labels[field.Field]; ok {
+			return "「" + label + "」填得不对，检查一下格式再保存。"
+		}
+	}
+	return "邮件设置没有保存，检查服务器地址、端口和邮箱格式。"
+}
+
+// mailTest sends one message before answering, so a wrong password is a message
+// on this page rather than a warning in a log nobody is reading.
 func (u *webUI) mailTest(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !u.parseForm(w, r) || !u.csrfOK(r) {
 		u.redirect(w, r, "/admin/mail?err=csrf")
 		return
 	}
-	if !u.mail.Info().Enabled {
-		u.redirect(w, r, "/admin/mail?err=mail_disabled")
-		return
-	}
 	to := strings.TrimSpace(r.PostFormValue("to"))
-	if to == "" {
-		to = u.mail.Info().Admin
-	}
 	if to == "" {
 		u.redirect(w, r, "/admin/mail?err=bad_request")
 		return
 	}
 	if err := u.mail.SendTest(r.Context(), to); err != nil {
 		u.logger.WarnContext(r.Context(), "send test mail", slog.Any("error", err))
-		u.redirect(w, r, "/admin/mail?err=error")
+		settings, _ := u.mail.Settings(r.Context())
+		// The mail server's own words, verbatim: "535 Login Fail" is the only
+		// place that answer exists, and paraphrasing it as "发送失败" would send
+		// the operator hunting in a log file.
+		u.render(w, http.StatusBadGateway, "mail", pageData{
+			Title: "邮件管理", Nav: "mail", Account: p.Account,
+			CSRFToken: u.csrfToken(w, r),
+			Error:     "测试邮件没有发出去：" + shortMailError(err),
+			Mail:      settings,
+		})
 		return
 	}
 	u.redirect(w, r, "/admin/mail?msg=mail_test_sent")
 }
 
-// auditPage reads the trail, newest first.
+// shortMailError trims the wrapping this console added and keeps the server's
+// reply, bounded so a chatty MTA cannot fill the page.
+func shortMailError(err error) string {
+	text := strings.TrimPrefix(err.Error(), "send test mail: ")
+	if runes := []rune(text); len(runes) > 300 {
+		return string(runes[:300]) + "…"
+	}
+	return text
+}
+
+// splitRecipients accepts however the operator separated the addresses.
+func splitRecipients(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(fields))
+	seen := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		field = strings.TrimSpace(field)
+		if field == "" {
+			continue
+		}
+		if _, duplicate := seen[strings.ToLower(field)]; duplicate {
+			continue
+		}
+		seen[strings.ToLower(field)] = struct{}{}
+		out = append(out, field)
+	}
+	return out
+}
+
 // auditPage reads the trail, newest first.
 func (u *webUI) auditPage(w http.ResponseWriter, r *http.Request, p *Principal) {
 	action := strings.TrimSpace(r.URL.Query().Get("action"))
 	position, err := cursor.Decode(r.URL.Query().Get("cursor"))
 	if err != nil {
 		u.render(w, http.StatusBadRequest, "audit", pageData{
-			Title: "审计日志", Nav: "audit", Account: p.Account,
+			Title: "最近活动", Nav: "audit", Account: p.Account,
 			CSRFToken: u.csrfToken(w, r), Error: "分页令牌无效，请从第一页重新开始。",
 		})
 		return
@@ -719,19 +824,47 @@ func (u *webUI) auditPage(w http.ResponseWriter, r *http.Request, p *Principal) 
 	if err != nil {
 		u.logger.ErrorContext(r.Context(), "console list audit", slog.Any("error", err))
 		u.render(w, http.StatusInternalServerError, "audit", pageData{
-			Title: "审计日志", Nav: "audit", Account: p.Account,
-			CSRFToken: u.csrfToken(w, r), Error: "读取审计日志失败，请查看服务日志。",
+			Title: "最近活动", Nav: "audit", Account: p.Account,
+			CSRFToken: u.csrfToken(w, r), Error: "读取最近活动失败，请查看服务日志。",
 		})
 		return
 	}
 
 	flash, errText := u.notices(r)
 	u.render(w, http.StatusOK, "audit", pageData{
-		Title: "审计日志", Nav: "audit", Account: p.Account,
+		Title: "最近活动", Nav: "audit", Account: p.Account,
 		CSRFToken: u.csrfToken(w, r),
 		Flash:     flash, Error: errText,
 		Entries: entries, Action: action, NextCursor: next,
 	})
+}
+
+// auditBulk removes selected entries from the trail.
+//
+// This is the only write the activity page offers. It is deliberately narrow:
+// the trail is how an operator answers "who deleted that comment", so every
+// removal is an explicit selection and is itself recorded under audit.delete.
+func (u *webUI) auditBulk(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !u.parseForm(w, r) || !u.csrfOK(r) {
+		u.redirect(w, r, "/admin/audit?err=csrf")
+		return
+	}
+	filter := strings.TrimSpace(r.PostFormValue("return"))
+	if len(r.PostForm["ids"]) == 0 {
+		u.redirect(w, r, auditPath(filter, "err", "no_selection"))
+		return
+	}
+
+	if _, err := u.svc.DeleteAuditLogs(r.Context(), r.PostForm["ids"], u.actor(r, p)); err != nil {
+		code := "error"
+		if fields := apperr.Fields(err); len(fields) > 0 {
+			code = "bad_request"
+		}
+		u.logger.ErrorContext(r.Context(), "console delete audit entries", slog.Any("error", err))
+		u.redirect(w, r, auditPath(filter, "err", code))
+		return
+	}
+	u.redirect(w, r, auditPath(filter, "msg", "activity_deleted"))
 }
 
 // render executes the page and writes it with the console's security headers.
@@ -763,11 +896,12 @@ func (u *webUI) render(w http.ResponseWriter, status int, page string, data page
 	header.Set("X-Content-Type-Options", "nosniff")
 	header.Set("X-Frame-Options", "DENY")
 	header.Set("Referrer-Policy", "no-referrer")
-	// The console loads nothing from anywhere: no fonts, no images, no
-	// scripts. The policy says so, so a future <script src> has to be a
-	// deliberate change rather than an accident.
+	// The console loads nothing from anywhere: no fonts, no remote images, no
+	// scripts. data: images are the one exception — the checkbox tick is a tiny
+	// inline SVG in app.css, and without img-src it would be blocked and render
+	// as an empty green square.
 	header.Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		"default-src 'none'; style-src 'self'; script-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
 }
@@ -971,6 +1105,24 @@ func commentsPath(status, keyword, key, value string) string {
 	return "/admin/comments?" + query.Encode()
 }
 
+// auditPath builds an activity URL that keeps the action filter.
+//
+// Same reasoning as commentsPath: url.Values escapes the filter, so an action
+// name or a code that happens to contain punctuation cannot split the query.
+func auditPath(filter, key, value string) string {
+	query := url.Values{}
+	if filter != "" {
+		query.Set("action", filter)
+	}
+	if key != "" && value != "" {
+		query.Set(key, value)
+	}
+	if len(query) == 0 {
+		return "/admin/audit"
+	}
+	return "/admin/audit?" + query.Encode()
+}
+
 // moderationErrorCode maps a queue failure to a query code the page can explain.
 func (u *webUI) moderationErrorCode(err error) string {
 	switch {
@@ -1025,9 +1177,9 @@ var flashMessages = map[string]string{
 	"bulk_done":        "已对选中的条目执行批量操作。",
 	"profile_saved":    "已保存账号资料。",
 	"mail_saved":       "已保存邮件设置。",
-	"mail_test_sent":   "测试邮件已交给发送队列。",
-	"mail_disabled":    "服务器未启用邮件（MAIL_ENABLED=false），无法发送。",
+	"mail_test_sent":   "SMTP 已接收这封测试邮件，去收件箱（含垃圾箱）确认一下。",
 	"bulk_partial":     "批量操作已执行，但有部分条目因保护规则被跳过。",
+	"activity_deleted": "已删除选中的活动记录。",
 }
 
 var errorMessages = map[string]string{
@@ -1100,6 +1252,7 @@ var actionLabels = map[string]string{
 	"comment.bulk.reject":     "批量拒绝评论",
 	"comment.bulk.spam":       "批量标记垃圾",
 	"comment.bulk.delete":     "批量删除评论",
+	"audit.delete":            "删除活动记录",
 }
 
 // relativeTime renders a timestamp the way an operator reads it: "3 分钟前" for
@@ -1134,19 +1287,22 @@ func firstRune(s string) string {
 	return "?"
 }
 
-// statusBadge maps a state to a Bootstrap badge class. Using Bootstrap's
-// text-bg-* utilities keeps contrast in both colour schemes without a second
-// set of status colours to maintain.
+// statusBadge maps a state to one of the console's badge modifiers.
+//
+// The modifier carries the colour, so a state can never be rendered with the
+// wrong one: there is no second class to forget next to it.
 func statusBadge(status any) string {
 	switch fmt.Sprint(status) {
 	case "pending":
-		return "text-bg-warning"
+		return "badge--pending"
 	case "approved", "active":
-		return "text-bg-success"
+		return "badge--approved"
+	case "rejected", "disabled":
+		return "badge--rejected"
 	case "spam":
-		return "text-bg-danger"
+		return "badge--spam"
 	default:
-		return "text-bg-secondary"
+		return "badge--rejected"
 	}
 }
 

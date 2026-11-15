@@ -1,94 +1,211 @@
 {{define "content"}}
 <div class="page-head">
   <div>
-    <h1 class="page-title">邮件管理</h1>
-    <p class="page-sub">通知邮件的开关，以及这台服务器现在的 SMTP 状态。</p>
+    <h1 class="page-head__title">邮件管理</h1>
+    <p class="page-head__sub">SMTP 账号、发件人与通知开关都在这里；保存后下一封信就按新设置走。</p>
+  </div>
+  <div class="page-head__actions">
+    <button class="btn btn--primary" type="submit" form="mail-form">保存设置</button>
   </div>
 </div>
+<div class="grid grid--split">
+  <form class="stack" id="mail-form" method="post" action="/admin/mail">
+    <input type="hidden" name="csrf" value="{{.CSRFToken}}">
 
-<div class="row g-3">
-  <div class="col-12 col-xl-7">
     <section class="panel">
-      <header class="panel-head">
+      <header class="panel__head">
         <div>
-          <h2 class="panel-title">通知开关</h2>
-          <p class="panel-sub">默认关闭；打开后才会有邮件发出</p>
-        </div>
-        <span class="badge rounded-pill {{if .Mail.Enabled}}text-bg-success{{else}}text-bg-secondary{{end}}">
-          {{if .Mail.Enabled}}SMTP 已配置{{else}}SMTP 未配置{{end}}
-        </span>
-      </header>
-      <div class="panel-body">
-        <form method="post" action="/admin/mail">
-          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-          <label class="switch-row">
-            <input class="form-check-input" type="checkbox" name="replyNotify" {{if .MailPrefs.ReplyNotify}}checked{{end}}>
-            <span>
-              <strong>回复提醒</strong>
-              <span class="switch-hint">评论通过审核后，给被它回复的人发一封邮件</span>
-            </span>
-          </label>
-          <label class="switch-row">
-            <input class="form-check-input" type="checkbox" name="adminNotify" {{if .MailPrefs.AdminNotify}}checked{{end}}>
-            <span>
-              <strong>新评论提醒</strong>
-              <span class="switch-hint">每条通过审核的评论都通知管理员邮箱</span>
-            </span>
-          </label>
-          <button class="btn btn-primary mt-3" type="submit">保存开关</button>
-          {{if not .Mail.Enabled}}<span class="small text-secondary ms-2">SMTP 未配置时开关可保存，但不会有邮件发出。</span>{{end}}
-        </form>
-      </div>
-    </section>
-
-    <section class="panel mt-3">
-      <header class="panel-head">
-        <div>
-          <h2 class="panel-title">测试发信</h2>
-          <p class="panel-sub">发一封测试邮件，确认 SMTP 设置可用</p>
+          <h2 class="panel__title">SMTP 服务器</h2>
+          <p class="panel__sub">QQ / 163 邮箱这里填「授权码」，不是登录密码</p>
         </div>
       </header>
-      <div class="panel-body">
-        <form method="post" action="/admin/mail/test" class="d-flex flex-wrap gap-2 align-items-end">
-          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-          <div class="flex-grow-1">
-            <label class="form-label small fw-semibold" for="mail-test-to">收件地址</label>
-            <input class="form-control" id="mail-test-to" name="to" type="email"
-                   value="{{.Mail.Admin}}" placeholder="留空则用管理员邮箱" {{if not .Mail.Enabled}}disabled{{end}}>
+      <div class="panel__body">
+        <div class="field-trio">
+          <div class="field">
+            <label class="field__label" for="mail-host">服务器地址</label>
+            <input class="input" id="mail-host" name="host" value="{{.Mail.Host}}"
+                   autocomplete="off" spellcheck="false">
           </div>
-          <button class="btn btn-outline-secondary" type="submit" {{if not .Mail.Enabled}}disabled{{end}}>发送测试</button>
+          <div class="field">
+            <label class="field__label" for="mail-port">端口</label>
+            <input class="input" id="mail-port" name="port" type="number" min="1" max="65535"
+                   value="{{.Mail.Port}}" required>
+          </div>
+          <div class="field">
+            <label class="field__label" for="mail-tls">加密方式</label>
+            <select class="select" id="mail-tls" name="tls">
+              <option value="auto" {{if eq .Mail.TLS "auto"}}selected{{end}}>自动（按端口）</option>
+              <option value="implicit" {{if eq .Mail.TLS "implicit"}}selected{{end}}>SSL / TLS</option>
+              <option value="starttls" {{if eq .Mail.TLS "starttls"}}selected{{end}}>STARTTLS</option>
+              <option value="none" {{if eq .Mail.TLS "none"}}selected{{end}}>不加密</option>
+            </select>
+          </div>
+        </div>
+        <p class="field__hint">「自动」= 465 用 SSL，其它端口用 STARTTLS。</p>
+        <div class="field-pair field-pair--even">
+          <div class="field">
+            <label class="field__label" for="mail-username">用户名</label>
+            <input class="input" id="mail-username" name="username" value="{{.Mail.Username}}"
+                   autocomplete="off" spellcheck="false" placeholder="通常就是发件邮箱">
+          </div>
+          <div class="field">
+            <label class="field__label" for="mail-password">密码 / 授权码</label>
+            <input class="input" id="mail-password" name="password" type="password"
+                   autocomplete="new-password" placeholder="{{if .Mail.HasPassword}}已保存，留空不修改{{else}}SMTP 密码或授权码{{end}}">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header class="panel__head">
+        <div>
+          <h2 class="panel__title">发件人与收件人</h2>
+          <p class="panel__sub">收件人邮箱被对方服务器拒收，是最常见的发信失败</p>
+        </div>
+      </header>
+      <div class="panel__body">
+        <div class="field-pair field-pair--even">
+          <div class="field">
+            <label class="field__label" for="mail-from">发件邮箱</label>
+            <input class="input" id="mail-from" name="from" type="email" value="{{.Mail.From}}"
+                   autocomplete="off">
+          </div>
+          <div class="field">
+            <label class="field__label" for="mail-from-name">发件人名称</label>
+            <input class="input" id="mail-from-name" name="fromName" value="{{.Mail.FromName}}"
+                   placeholder="站点名称" maxlength="80">
+          </div>
+        </div>
+        <div class="field">
+          <label class="field__label" for="mail-admin-to">管理员收件邮箱</label>
+          <input class="input" id="mail-admin-to" name="adminTo"
+                 value="{{range $i, $to := .Mail.AdminTo}}{{if $i}}, {{end}}{{$to}}{{end}}"
+                 autocomplete="off" spellcheck="false">
+          <span class="field__hint">多个地址用逗号分隔；留空则只发回复提醒。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header class="panel__head">
+        <div>
+          <h2 class="panel__title">通知开关</h2>
+          <p class="panel__sub">取消勾选就不再发这一类邮件；两个都关掉等于静音</p>
+        </div>
+      </header>
+      <div class="panel__body">
+        <label class="switch">
+          <input class="check" type="checkbox" name="adminNotify" {{if .Mail.AdminNotify}}checked{{end}}>
+          <span>
+            <span class="switch__text">新评论提醒管理员</span>
+            <span class="switch__hint">每条通过审核的评论都发到上面的收件邮箱</span>
+          </span>
+        </label>
+        <label class="switch">
+          <input class="check" type="checkbox" name="replyNotify" {{if .Mail.ReplyNotify}}checked{{end}}>
+          <span>
+            <span class="switch__text">通知原评论作者</span>
+            <span class="switch__hint">只给填了邮箱的原作者发信；自己回复自己不发。</span>
+          </span>
+        </label>
+      </div>
+    </section>
+    <section class="panel">
+      <header class="panel__head">
+        <div>
+          <h2 class="panel__title">邮件模板</h2>
+          <p class="panel__sub">留空用内置模板；填了就用你这一整段 HTML</p>
+        </div>
+      </header>
+      <div class="panel__body">
+        <div class="field">
+          <label class="field__label" for="mail-template-admin">新评论通知管理员</label>
+          <textarea class="textarea" id="mail-template-admin" name="templateAdmin" rows="6"
+                    spellcheck="false" placeholder="留空 = 使用内置模板">{{.Mail.TemplateAdmin}}</textarea>
+        </div>
+        <div class="field">
+          <label class="field__label" for="mail-template-reply">回复通知原评论作者</label>
+          <textarea class="textarea" id="mail-template-reply" name="templateReply" rows="6"
+                    spellcheck="false" placeholder="留空 = 使用内置模板">{{.Mail.TemplateReply}}</textarea>
+        </div>
+        <div class="tokens">
+          <span class="field__hint">可用变量</span>
+          <code class="chip">&#123;&#123;siteName&#125;&#125;</code>
+          <code class="chip">&#123;&#123;siteURL&#125;&#125;</code>
+          <code class="chip">&#123;&#123;postSlug&#125;&#125;</code>
+          <code class="chip">&#123;&#123;postURL&#125;&#125;</code>
+          <code class="chip">&#123;&#123;consoleURL&#125;&#125;</code>
+          <code class="chip">&#123;&#123;authorName&#125;&#125;</code>
+          <code class="chip">&#123;&#123;authorEmail&#125;&#125;</code>
+          <code class="chip">&#123;&#123;parentAuthor&#125;&#125;</code>
+          <code class="chip">&#123;&#123;body&#125;&#125;</code>
+          <code class="chip">&#123;&#123;time&#125;&#125;</code>
+        </div>
+        <p class="field__hint">变量会先做 HTML 转义再插入；正文换行要放在带 white-space:pre-wrap 的元素里才不会被折叠。纯文本客户端仍会收到内置的纯文本版本。</p>
+      </div>
+    </section>
+
+  </form>
+
+  <div class="stack">
+    <section class="panel">
+      <header class="panel__head">
+        <div>
+          <h2 class="panel__title">测试发信</h2>
+          <p class="panel__sub">当场发一封；失败会直接报在这里，不写进队列</p>
+        </div>
+      </header>
+      <div class="panel__body">
+        <form method="post" action="/admin/mail/test">
+          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+          <div class="field">
+            <label class="field__label" for="mail-test-to">收件地址</label>
+            <input class="input" id="mail-test-to" name="to" type="email" required
+                   autocomplete="off" spellcheck="false">
+          </div>
+          <div class="cluster mt-3">
+            <button class="btn btn--outline" type="submit"
+                    {{if or (not .Mail.Host) (not .Mail.From)}}disabled{{end}}>发送测试邮件</button>
+          </div>
+          {{if or (not .Mail.Host) (not .Mail.From)}}
+          <p class="field__hint mt-2">先填好服务器地址和发件邮箱、保存，再来测。</p>
+          {{else}}
+          <p class="field__hint mt-2">用的是已保存的设置；改了字段要先保存再测。收不到先翻垃圾箱——QQ / 163 要求发件邮箱与登录账号完全一致。</p>
+          {{end}}
         </form>
       </div>
     </section>
-  </div>
 
-  <div class="col-12 col-xl-5">
     <section class="panel">
-      <header class="panel-head">
+      <header class="panel__head">
         <div>
-          <h2 class="panel-title">SMTP 配置</h2>
-          <p class="panel-sub">只读；由环境变量决定，改完需要重启</p>
+          <h2 class="panel__title">常见邮箱</h2>
+          <p class="panel__sub">照抄，密码换成授权码</p>
         </div>
       </header>
-      <ul class="detail-list">
-        <li><span>状态</span><span>{{if .Mail.Enabled}}<span class="text-success-emphasis">已启用</span>{{else}}未启用（MAIL_ENABLED=false）{{end}}</span></li>
-        <li><span>服务器</span><span class="mono">{{if .Mail.Host}}{{.Mail.Host}}:{{.Mail.Port}}{{else}}—{{end}}</span></li>
-        <li><span>加密</span><span>{{if .Mail.TLS}}{{.Mail.TLS}}{{else}}auto{{end}}</span></li>
-        <li><span>发件人</span><span class="text-break">{{if .Mail.From}}{{.Mail.From}}{{else}}—{{end}}</span></li>
-        <li><span>管理员邮箱</span><span class="text-break">{{if .Mail.Admin}}{{.Mail.Admin}}{{else}}未配置{{end}}</span></li>
+      <ul class="detail">
+        <li class="detail__row">
+          <span class="detail__key">QQ 邮箱</span>
+          <span class="mono">smtp.qq.com · 465 · SSL</span>
+        </li>
+        <li class="detail__row">
+          <span class="detail__key">163 / 126</span>
+          <span class="mono">smtp.163.com · 465 · SSL</span>
+        </li>
+        <li class="detail__row">
+          <span class="detail__key">Gmail</span>
+          <span class="mono">smtp.gmail.com · 587 · STARTTLS</span>
+        </li>
+        <li class="detail__row">
+          <span class="detail__key">腾讯企业邮</span>
+          <span class="mono">smtp.exmail.qq.com · 465 · SSL</span>
+        </li>
+        <li class="detail__row">
+          <span class="detail__key">阿里企业邮</span>
+          <span class="mono">smtp.mxhichina.com · 465 · SSL</span>
+        </li>
       </ul>
-    </section>
-
-    <section class="panel mt-3">
-      <header class="panel-head">
-        <div>
-          <h2 class="panel-title">说明</h2>
-          <p class="panel-sub">邮件什么时候发出</p>
-        </div>
-      </header>
-      <div class="panel-body small text-secondary">
-        只有上面的开关打开、且评论通过审核时才会发信。审核操作本身不会触发邮件——开关关着的时候，通过评论不会发出任何邮件。SMTP 凭据只在服务器环境变量里，这个页面不保存、也不显示密码。
-      </div>
     </section>
   </div>
 </div>
