@@ -169,8 +169,11 @@ func (c *Comment) Validate() error {
 }
 
 // Query narrows a comment listing. Its zero value is valid and means "all
-// comments of the post, default page size".
+// comments, default page size".
 type Query struct {
+	// PostSlug limits the listing to one post. Empty means every post, which
+	// is what the moderation queue asks for: an operator reviews what arrived,
+	// not one article at a time.
 	PostSlug string
 	Status   CommentStatus
 	Limit    int

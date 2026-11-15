@@ -1,0 +1,70 @@
+{{define "content"}}
+<h1>管理员账号</h1>
+
+<section class="card">
+  <h2>新建账号</h2>
+  <form method="post" action="/admin/accounts">
+    <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+    <div class="row">
+      <label>用户名
+        <input name="username" required placeholder="小写字母、数字、._-，3–40 位">
+      </label>
+      <label>显示名（可选）
+        <input name="displayName" placeholder="留空则用用户名">
+      </label>
+      <label>密码
+        <input type="password" name="password" required placeholder="至少 12 位">
+      </label>
+      <button class="primary" type="submit">创建</button>
+    </div>
+  </form>
+</section>
+
+<table>
+  <thead>
+    <tr><th>用户名</th><th>显示名</th><th>状态</th><th>最近登录</th><th>创建时间</th><th>操作</th></tr>
+  </thead>
+  <tbody>
+    {{range .Accounts}}
+    <tr>
+      <td class="mono">{{.Username}}{{if eq .ID $.Account.ID}} <span class="muted">（你）</span>{{end}}</td>
+      <td>{{.DisplayName}}</td>
+      <td><span class="pill {{.Status}}">{{statusLabel .Status}}</span></td>
+      <td class="nowrap">{{if .LastLoginAt}}{{fmtTime .LastLoginAt}}{{else}}从未{{end}}</td>
+      <td class="nowrap">{{fmtTime .CreatedAt}}</td>
+      <td>
+        <div class="actions">
+          {{if eqStr .Status "active"}}
+          <form method="post" action="/admin/accounts/{{.ID}}/status">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="status" value="disabled">
+            <button type="submit">停用</button>
+          </form>
+          {{else}}
+          <form method="post" action="/admin/accounts/{{.ID}}/status">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="status" value="active">
+            <button type="submit">启用</button>
+          </form>
+          {{end}}
+          <form method="post" action="/admin/accounts/{{.ID}}/password">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <input type="password" name="currentPassword" placeholder="当前密码（改自己必填）" style="width:170px">
+            <input type="password" name="password" required placeholder="新密码" style="width:140px">
+            <button type="submit">改密</button>
+          </form>
+          <form method="post" action="/admin/accounts/{{.ID}}/delete"
+                onsubmit="return confirm('删除这个账号及其全部会话？')">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <button class="danger" type="submit">删除</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+<p class="muted" style="margin-top:12px">
+  改密会撤销该账号的全部会话；重置自己的密码后需要重新登录。不能停用或删除当前登录的账号，也不能停用/删除最后一个管理员。
+</p>
+{{end}}

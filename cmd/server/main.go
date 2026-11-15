@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,8 +13,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/liomix/astro-liomix-server/internal/admin"
 	"github.com/liomix/astro-liomix-server/internal/comment"
 	"github.com/liomix/astro-liomix-server/internal/count"
+	"github.com/liomix/astro-liomix-server/internal/platform/audit"
 	"github.com/liomix/astro-liomix-server/internal/platform/config"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
 	"github.com/liomix/astro-liomix-server/internal/platform/idempotency"
@@ -38,6 +41,18 @@ var (
 )
 
 func main() {
+	// `server admin …` is an operator command, not a second server mode: it
+	// opens the database, applies migrations and exits. Keeping it in the same
+	// binary means there is no separate tool to install or version alongside
+	// the server.
+	if len(os.Args) > 1 && os.Args[1] == "admin" {
+		if err := runAdmin(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "admin:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if err := run(); err != nil {
 		slog.Error("server exited with error", slog.Any("error", err))
 		os.Exit(1)
@@ -62,12 +77,7 @@ func run() error {
 	startupCtx, startupCancel := context.WithTimeout(context.Background(), startupTimeout)
 	defer startupCancel()
 
-	db, err := postgres.Open(startupCtx, postgres.Config{
-		URL:             cfg.Database.URL,
-		MaxOpenConns:    cfg.Database.MaxOpenConns,
-		MaxIdleConns:    cfg.Database.MaxIdleConns,
-		ConnMaxLifetime: cfg.Database.ConnMaxLifetime,
-	})
+	db, err := openDatabase(startupCtx, cfg)
 	if err != nil {
 		return err
 	}
@@ -76,18 +86,6 @@ func run() error {
 			logger.Error("close database", slog.Any("error", err))
 		}
 	}()
-
-	// Each module owns its DDL and applies it here, so adding a table is a
-	// migration file next to the module rather than an edit to this function.
-	if err := comment.Migrate(startupCtx, db); err != nil {
-		return err
-	}
-	if err := count.Migrate(startupCtx, db); err != nil {
-		return err
-	}
-	if err := idempotency.Migrate(startupCtx, db); err != nil {
-		return err
-	}
 	logger.Info("database ready", slog.String("dsn", postgres.Redact(cfg.Database.URL)))
 
 	commentRepo := comment.NewPostgresRepository(db)
@@ -115,6 +113,42 @@ func run() error {
 		return fmt.Errorf("build count service: %w", err)
 	}
 
+	// The audit trail is shared: the admin module writes to it and serves it,
+	// the comment module records moderation actions through the same store, so
+	// one page answers "what did this account do" across both.
+	auditStore := audit.NewStore(db)
+	adminService, err := admin.NewService(admin.NewPostgresRepository(db),
+		admin.WithLogger(logger),
+		admin.WithSessionTTL(cfg.Admin.SessionTTL),
+		admin.WithAuditor(auditStore),
+		admin.WithAuditReader(auditStore),
+	)
+	if err != nil {
+		return fmt.Errorf("build admin service: %w", err)
+	}
+
+	if pruned, err := adminService.PruneExpiredSessions(startupCtx); err != nil {
+		logger.Warn("prune admin sessions", slog.Any("error", err))
+	} else if pruned > 0 {
+		logger.Info("pruned admin sessions", slog.Int64("rows", pruned))
+	}
+
+	// The first administrator is created from the environment, once. Bootstrap
+	// is a no-op as soon as any account exists, which is what makes these
+	// variables safe to leave set across a restart — and why they should be
+	// removed as soon as the account is confirmed working.
+	if cfg.Admin.BootstrapUsername != "" {
+		created, err := adminService.Bootstrap(startupCtx, cfg.Admin.BootstrapUsername, "", cfg.Admin.BootstrapPassword)
+		if err != nil {
+			return fmt.Errorf("bootstrap administrator: %w", err)
+		}
+		if created {
+			logger.Warn("created the first administrator from ADMIN_BOOTSTRAP_*; remove those variables now")
+		} else {
+			logger.Info("administrator bootstrap skipped, accounts already exist")
+		}
+	}
+
 	// The router owns health probes, the 404 fallback and the middleware stack;
 	// each module mounts its own routes through the callback, so it never needs
 	// to know about middleware.
@@ -125,11 +159,24 @@ func run() error {
 		},
 		func(mux *http.ServeMux) {
 			comment.RegisterRoutes(mux, logger, commentService, comment.HTTPConfig{
-				MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
-				AdminToken:   cfg.Admin.Token,
-				Idempotency:  idempotencyStore,
+				MaxBodyBytes:    cfg.HTTP.MaxBodyBytes,
+				AdminToken:      cfg.Admin.Token,
+				AdminAuthorizer: adminService.AuthorizeRequest,
+				Auditor:         auditStore,
+				Idempotency:     idempotencyStore,
 			})
 			count.RegisterRoutes(mux, logger, countService, count.HTTPConfig{})
+			admin.RegisterRoutes(mux, logger, adminService, admin.HTTPConfig{
+				MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
+			})
+			// The console is a separate transport: cookie-authenticated pages
+			// under /admin, next to the bearer-authenticated JSON API under
+			// /api/v1/admin.
+			admin.RegisterWebUI(mux, logger, adminService, admin.WebUIConfig{
+				Moderation:    moderationQueue{svc: commentService},
+				Auditor:       auditStore,
+				SecureCookies: cfg.Admin.CookieSecure,
+			})
 		},
 	)
 
@@ -183,6 +230,44 @@ func run() error {
 	}
 	logger.Info("server stopped")
 	return nil
+}
+
+// openDatabase opens the pool and applies every module's migrations.
+//
+// The server and the operator commands share this path on purpose: a CLI that
+// skipped migrations could write to a schema the server's queries do not
+// expect, and "it worked when I created the account" would be the last thing
+// anyone remembered.
+func openDatabase(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
+	db, err := postgres.Open(ctx, postgres.Config{
+		URL:             cfg.Database.URL,
+		MaxOpenConns:    cfg.Database.MaxOpenConns,
+		MaxIdleConns:    cfg.Database.MaxIdleConns,
+		ConnMaxLifetime: cfg.Database.ConnMaxLifetime,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Each module owns its DDL, so adding a table is a migration file next to
+	// the module rather than an edit here.
+	steps := []struct {
+		module  string
+		migrate func(context.Context, *sql.DB) error
+	}{
+		{"comment", comment.Migrate},
+		{"count", count.Migrate},
+		{"audit", audit.Migrate},
+		{"admin", admin.Migrate},
+		{"idempotency", idempotency.Migrate},
+	}
+	for _, step := range steps {
+		if err := step.migrate(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate %s: %w", step.module, err)
+		}
+	}
+	return db, nil
 }
 
 // newLogger returns JSON logs in production (for log collectors) and readable

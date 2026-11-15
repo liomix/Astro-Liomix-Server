@@ -1,6 +1,7 @@
 package comment_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,9 +9,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/liomix/astro-liomix-server/internal/comment"
+	"github.com/liomix/astro-liomix-server/internal/platform/audit"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
 )
 
@@ -731,5 +734,112 @@ func TestCountCommentsRejectsBadBatches(t *testing.T) {
 		if rec.Code != http.StatusUnprocessableEntity {
 			t.Errorf("%s status = %d, want %d (body: %s)", target, rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
 		}
+	}
+}
+
+// recordingAudit keeps moderation events in memory so a test can assert that a
+// privileged action was attributed to the account that performed it.
+type recordingAudit struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (r *recordingAudit) Record(ctx context.Context, e audit.Event) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+	return nil
+}
+
+func (r *recordingAudit) byAction(action string) []audit.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []audit.Event
+	for _, e := range r.events {
+		if e.Action == action {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// TestModerationAcceptsAnAdminSession covers the seam between the admin module
+// and this one: the credential is not the static ADMIN_TOKEN but a session
+// resolved by the injected authorizer, and the action is attributed in the
+// audit trail rather than done anonymously.
+func TestModerationAcceptsAnAdminSession(t *testing.T) {
+	t.Parallel()
+
+	const sessionToken = "adm_session-token"
+	recorder := &recordingAudit{}
+	authorize := func(r *http.Request) (*audit.Actor, bool) {
+		if httpkit.BearerToken(r) != sessionToken {
+			return nil, false
+		}
+		return &audit.Actor{ID: "a-1", Name: "ada", IP: "127.0.0.1"}, true
+	}
+
+	svc, err := comment.NewService(newMemoryRepository(), comment.WithLogger(discardLogger()))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	// AdminToken is deliberately empty: this deployment moderates with accounts,
+	// not with a shared secret.
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		comment.RegisterRoutes(mux, discardLogger(), svc, comment.HTTPConfig{
+			AdminAuthorizer: authorize,
+			Auditor:         recorder,
+		})
+	})
+
+	created := decodeComment(t, do(t, router, http.MethodPost, "/api/v1/posts/hello/comments", createBody("Ada", "hi")))
+
+	if rec := doWithToken(t, router, http.MethodPatch, "/api/v1/comments/"+created.ID+"/status", `{"status":"approved"}`, "wrong"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("PATCH with a foreign token = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+
+	rec := doWithToken(t, router, http.MethodPatch, "/api/v1/comments/"+created.ID+"/status", `{"status":"approved"}`, sessionToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH with a session = %d, want %d (body: %s)", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := decodeComment(t, rec); got.Status != "approved" {
+		t.Errorf("status = %q, want approved", got.Status)
+	}
+
+	events := recorder.byAction("comment.moderate")
+	if len(events) != 1 {
+		t.Fatalf("moderation events = %d, want 1", len(events))
+	}
+	if events[0].Actor.ID != "a-1" || events[0].Actor.Name != "ada" {
+		t.Errorf("actor = %+v, want the session's account", events[0].Actor)
+	}
+	if events[0].ResourceID != created.ID {
+		t.Errorf("resourceId = %q, want %q", events[0].ResourceID, created.ID)
+	}
+	if got, _ := events[0].Detail["status"].(string); got != "approved" {
+		t.Errorf("detail.status = %v, want approved", events[0].Detail["status"])
+	}
+
+	// The queue is readable with the same credential, and the response must not
+	// be cached: it was answered to a credential.
+	rec = doWithToken(t, router, http.MethodGet, "/api/v1/posts/hello/comments?status=pending", "", sessionToken)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("queue status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if cc := rec.Header().Get("Cache-Control"); cc != httpkit.CacheNoStore {
+		t.Errorf("Cache-Control = %q, want %q", cc, httpkit.CacheNoStore)
+	}
+
+	// Deleting as an administrator is audited too, and does not need the
+	// author's per-comment credential.
+	rec = doWithToken(t, router, http.MethodDelete, "/api/v1/comments/"+created.ID, "", sessionToken)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE with a session = %d, want %d (body: %s)", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+	if events := recorder.byAction("comment.delete"); len(events) != 1 {
+		t.Errorf("delete events = %d, want 1", len(events))
 	}
 }

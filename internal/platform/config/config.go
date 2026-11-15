@@ -51,11 +51,29 @@ type Database struct {
 	ConnMaxLifetime time.Duration
 }
 
-// Admin holds the credentials of the single privileged operator.
+// Admin holds the console credentials: the legacy static token, the session
+// lifetime and the one-time bootstrap of the first account.
 type Admin struct {
 	// Token guards the moderation routes. Empty means moderation is disabled,
 	// not that it is open to everyone.
+	//
+	// It is the legacy path: the admin module's accounts are the way in, and a
+	// static token that never expires is what an incident responder uses to get
+	// back in when the account table is the problem. Keeping it costs one
+	// constant-time comparison per privileged request.
 	Token string
+	// SessionTTL is how long an administrator's sign-in lasts.
+	SessionTTL time.Duration
+	// BootstrapUsername and BootstrapPassword create the first account when the
+	// table is empty. Both must be set together; once any account exists they
+	// are ignored, so they are safe to leave set across a restart but should be
+	// removed afterwards.
+	BootstrapUsername string
+	BootstrapPassword string
+	// CookieSecure marks the console cookies Secure. Turn it on wherever the
+	// console is served over HTTPS; local http development needs it off, or
+	// the browser refuses to store the session cookie.
+	CookieSecure bool
 }
 
 // HTTP holds the transport-level settings.
@@ -106,6 +124,12 @@ func Load() (*Config, error) {
 			MaxIdleConns:    5,
 			ConnMaxLifetime: 30 * time.Minute,
 		},
+		Admin: Admin{
+			// A week is long enough that an operator is not signing in every
+			// day on a machine nobody else uses, short enough that a forgotten
+			// session on a shared laptop stops working.
+			SessionTTL: 7 * 24 * time.Hour,
+		},
 	}
 
 	var errs []error
@@ -136,6 +160,10 @@ func Load() (*Config, error) {
 	if token, ok := os.LookupEnv("ADMIN_TOKEN"); ok {
 		cfg.Admin.Token = strings.TrimSpace(token)
 	}
+	loadDuration("ADMIN_SESSION_TTL", &cfg.Admin.SessionTTL, &errs)
+	cfg.Admin.BootstrapUsername = strings.TrimSpace(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"))
+	cfg.Admin.BootstrapPassword = os.Getenv("ADMIN_BOOTSTRAP_PASSWORD")
+	loadBool("ADMIN_COOKIE_SECURE", &cfg.Admin.CookieSecure, &errs)
 
 	if err := errors.Join(errs...); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -160,6 +188,15 @@ func (c *Config) validate() error {
 	// a token that looks configured but is not much better than none.
 	if c.Admin.Token != "" && len(c.Admin.Token) < minAdminTokenLength {
 		errs = append(errs, fmt.Errorf("ADMIN_TOKEN must be at least %d characters", minAdminTokenLength))
+	}
+	if c.Admin.SessionTTL <= 0 {
+		errs = append(errs, errors.New("ADMIN_SESSION_TTL must be positive"))
+	}
+	// A username without a password (or the reverse) is a half-configured
+	// bootstrap: the process would start, create nothing, and leave the
+	// operator with a console nobody can sign in to.
+	if (c.Admin.BootstrapUsername == "") != (c.Admin.BootstrapPassword == "") {
+		errs = append(errs, errors.New("ADMIN_BOOTSTRAP_USERNAME and ADMIN_BOOTSTRAP_PASSWORD must be set together"))
 	}
 	for name, d := range map[string]time.Duration{
 		"HTTP_READ_HEADER_TIMEOUT": c.HTTP.ReadHeaderTimeout,
@@ -273,6 +310,22 @@ func loadDuration(key string, dst *time.Duration, errs *[]error) {
 	value, err := time.ParseDuration(strings.TrimSpace(raw))
 	if err != nil {
 		*errs = append(*errs, fmt.Errorf("%s: %q is not a duration (e.g. 10s, 1m)", key, raw))
+		return
+	}
+	*dst = value
+}
+
+// loadBool reads a boolean flag. Accepts the spellings strconv.ParseBool does:
+// 1/0, t/f, true/false, yes/no are not all of them, so the error names the
+// accepted forms rather than leaving the operator guessing.
+func loadBool(key string, dst *bool, errs *[]error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return
+	}
+	value, err := strconv.ParseBool(strings.TrimSpace(raw))
+	if err != nil {
+		*errs = append(*errs, fmt.Errorf("%s: %q is not a boolean (use true or false)", key, raw))
 		return
 	}
 	*dst = value

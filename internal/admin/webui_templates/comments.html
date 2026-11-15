@@ -1,0 +1,59 @@
+{{define "content"}}
+<h1>评论审核</h1>
+<div class="tabs">
+  {{range .Statuses}}<a href="/admin/comments?status={{.}}" {{if eq $.Status .}}class="on"{{end}}>{{statusLabel .}}</a>{{end}}
+</div>
+{{if .Comments}}
+<table>
+  <thead>
+    <tr><th>时间</th><th>作者</th><th>文章</th><th>内容</th><th>状态</th><th>操作</th></tr>
+  </thead>
+  <tbody>
+    {{range .Comments}}
+    <tr>
+      <td class="nowrap">{{fmtTime .CreatedAt}}</td>
+      <td>{{.AuthorName}}<br><span class="muted">{{.AuthorEmail}}</span></td>
+      <td class="mono">{{.PostSlug}}</td>
+      <td><pre class="body">{{.Body}}</pre></td>
+      <td><span class="pill {{.Status}}">{{statusLabel .Status}}</span></td>
+      <td>
+        <div class="actions">
+          {{if ne .Status "approved"}}
+          <form method="post" action="/admin/comments/{{.ID}}/status">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="status" value="approved">
+            <button type="submit">通过</button>
+          </form>
+          {{end}}
+          {{if ne .Status "rejected"}}
+          <form method="post" action="/admin/comments/{{.ID}}/status">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="status" value="rejected">
+            <button type="submit">拒绝</button>
+          </form>
+          {{end}}
+          {{if ne .Status "spam"}}
+          <form method="post" action="/admin/comments/{{.ID}}/status">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <input type="hidden" name="status" value="spam">
+            <button type="submit">垃圾</button>
+          </form>
+          {{end}}
+          <form method="post" action="/admin/comments/{{.ID}}/delete"
+                onsubmit="return confirm('删除这条评论及其全部回复？')">
+            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+            <button class="danger" type="submit">删除</button>
+          </form>
+        </div>
+      </td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">这个状态下没有评论。</p>
+{{end}}
+{{if .NextCursor}}
+<p class="pager"><a href="/admin/comments?status={{.Status}}&cursor={{.NextCursor}}">下一页</a></p>
+{{end}}
+{{end}}

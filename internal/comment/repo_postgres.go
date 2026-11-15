@@ -151,11 +151,20 @@ func (r *PostgresRepository) Get(ctx context.Context, commentID string) (*Commen
 // would re-scan everything above the page and repeat a row whenever the thread
 // grew between two requests.
 func (r *PostgresRepository) List(ctx context.Context, q Query) ([]*Comment, error) {
-	args := []any{q.PostSlug}
-	status := ""
+	// The slug filter is optional: a thread listing always names a post, while
+	// the moderation queue lists every post at once. Building the WHERE clause
+	// instead of always emitting `post_slug = $1` is what lets one query serve
+	// both — an empty slug used to match nothing, which read as "no pending
+	// comments" no matter what was in the table.
+	args := make([]any, 0, 3)
+	where := " WHERE true"
+	if q.PostSlug != "" {
+		args = append(args, q.PostSlug)
+		where += fmt.Sprintf(" AND post_slug = $%d", len(args))
+	}
 	if q.Status != "" {
 		args = append(args, string(q.Status))
-		status = fmt.Sprintf(" AND status = $%d", len(args))
+		where += fmt.Sprintf(" AND status = $%d", len(args))
 	}
 
 	after := ""
@@ -164,7 +173,7 @@ func (r *PostgresRepository) List(ctx context.Context, q Query) ([]*Comment, err
 		after = fmt.Sprintf(" AND (created_at, id) < ($%d, $%d)", len(args)-1, len(args))
 	}
 
-	query := `SELECT ` + commentColumns + ` FROM comments WHERE post_slug = $1` + status + after +
+	query := `SELECT ` + commentColumns + ` FROM comments` + where + after +
 		` ORDER BY created_at DESC, id DESC`
 	// Limit is a bound the service already validated against MaxPageSize, so it
 	// is interpolated as an integer rather than sent as a parameter that would

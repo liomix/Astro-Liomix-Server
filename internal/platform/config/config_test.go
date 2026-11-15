@@ -24,6 +24,10 @@ func clearEnv(t *testing.T) {
 		"HTTP_MAX_BODY_BYTES",
 		"HTTP_CORS_ORIGINS",
 		"ADMIN_TOKEN",
+		"ADMIN_SESSION_TTL",
+		"ADMIN_BOOTSTRAP_USERNAME",
+		"ADMIN_BOOTSTRAP_PASSWORD",
+		"ADMIN_COOKIE_SECURE",
 		"COMMENT_DEFAULT_PAGE_SIZE",
 		"COMMENT_MAX_PAGE_SIZE",
 		"DATABASE_URL",
@@ -229,5 +233,45 @@ func TestLoadRejectsIdleAboveOpen(t *testing.T) {
 
 	if _, err := config.Load(); err == nil || !strings.Contains(err.Error(), "DATABASE_MAX_IDLE_CONNS") {
 		t.Fatalf("Load() error = %v, want a DATABASE_MAX_IDLE_CONNS complaint", err)
+	}
+}
+
+func TestLoadAdminSettings(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("ADMIN_SESSION_TTL", "24h")
+	t.Setenv("ADMIN_BOOTSTRAP_USERNAME", "  owner  ")
+	t.Setenv("ADMIN_BOOTSTRAP_PASSWORD", "dev-admin-password-123")
+	t.Setenv("ADMIN_COOKIE_SECURE", "true")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Admin.SessionTTL != 24*time.Hour {
+		t.Errorf("SessionTTL = %v, want 24h", cfg.Admin.SessionTTL)
+	}
+	if cfg.Admin.BootstrapUsername != "owner" {
+		t.Errorf("BootstrapUsername = %q, want it trimmed", cfg.Admin.BootstrapUsername)
+	}
+	if cfg.Admin.BootstrapPassword != "dev-admin-password-123" {
+		t.Errorf("BootstrapPassword = %q, want it unchanged", cfg.Admin.BootstrapPassword)
+	}
+	if !cfg.Admin.CookieSecure {
+		t.Error("CookieSecure = false, want true from ADMIN_COOKIE_SECURE")
+	}
+}
+
+func TestLoadRejectsHalfConfiguredBootstrap(t *testing.T) {
+	// A username without a password would start the process, create nothing,
+	// and leave a console nobody can sign in to. Both or neither.
+	clearEnv(t)
+	t.Setenv("ADMIN_BOOTSTRAP_USERNAME", "owner")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("Load() error = nil for a half-configured bootstrap")
+	}
+	if !strings.Contains(err.Error(), "ADMIN_BOOTSTRAP") {
+		t.Errorf("error = %v, want it to name the bootstrap variables", err)
 	}
 }

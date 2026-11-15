@@ -1,0 +1,36 @@
+{{define "content"}}
+<h1>审计日志</h1>
+
+<form method="get" action="/admin/audit" class="row" style="margin-bottom:16px">
+  <label style="max-width:260px">动作
+    <input name="action" value="{{.Action}}" placeholder="如 auth.login、comment.moderate">
+  </label>
+  <button type="submit">筛选</button>
+  {{if .Action}}<a href="/admin/audit" style="padding-bottom:8px">清除</a>{{end}}
+</form>
+
+{{if .Entries}}
+<table>
+  <thead>
+    <tr><th>时间</th><th>操作者</th><th>动作</th><th>对象</th><th>详情</th><th>来源</th></tr>
+  </thead>
+  <tbody>
+    {{range .Entries}}
+    <tr>
+      <td class="nowrap">{{fmtTime .At}}</td>
+      <td>{{if .Actor.Name}}{{.Actor.Name}}{{else}}<span class="muted">system</span>{{end}}</td>
+      <td class="mono">{{.Action}}</td>
+      <td class="mono">{{.Resource}}{{if .ResourceID}} / {{.ResourceID}}{{end}}</td>
+      <td class="mono">{{jsonDetail .Detail}}</td>
+      <td class="mono">{{if .Actor.IP}}{{.Actor.IP}}{{end}}<br><span class="muted">{{.Actor.UserAgent}}</span></td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="empty">还没有记录。</p>
+{{end}}
+{{if .NextCursor}}
+<p class="pager"><a href="/admin/audit?action={{.Action}}&cursor={{.NextCursor}}">下一页</a></p>
+{{end}}
+{{end}}

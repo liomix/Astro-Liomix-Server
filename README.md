@@ -1,6 +1,6 @@
 # Astro Liomix Server
 
-Astro Liomix 博客的 Go 后端。当前实现**评论**与**站点访问计数**两块能力：标准库 `net/http` 的 REST API，按领域模块组织（`internal/comment`、`internal/count` 各自自带实体、用例、仓储与传输），数据存 **PostgreSQL**，表结构与索引由模块自带的迁移在启动时应用，测试覆盖完整。
+Astro Liomix 博客的 Go 后端。当前实现**评论**、**站点访问计数**与**管理员控制台**三块能力：标准库 `net/http` 的 REST API，按领域模块组织（`internal/comment`、`internal/count`、`internal/admin` 各自自带实体、用例、仓储与传输），数据存 **PostgreSQL**，表结构与索引由模块自带的迁移在启动时应用，测试覆盖完整。
 
 ## 技术栈
 
@@ -25,8 +25,17 @@ Astro Liomix 博客的 Go 后端。当前实现**评论**与**站点访问计数
 # 1. 运行（默认监听 :8080；development 下不设 DATABASE_URL 就连本机 Blog 库）
 go run ./cmd/server
 
-# 带本地审核口令，能把刚发的评论审过
+# 带本地审核口令，能把刚发的评论审过（静态口令是应急通道）
 ADMIN_TOKEN=dev-admin-token-0123456789 go run ./cmd/server
+
+# 第一次运行前，先在数据库里创建管理员账号（密码只以 PBKDF2 摘要入库）
+go run ./cmd/server admin create -username owner
+#   默认生成 24 位随机密码并只打印一次；想自己指定就从管道读：
+#   echo 'my-long-passphrase' | go run ./cmd/server admin create -username owner -password-stdin
+
+# 然后启动服务并打开控制台（服务端渲染，不需要 Node）：
+go run ./cmd/server
+#   http://localhost:8080/admin
 
 # 或用 Makefile
 make run    # 等价于 go run
@@ -49,6 +58,18 @@ curl -X POST http://localhost:8080/api/v1/count/site/visits \
 
 curl http://localhost:8080/api/v1/count/site
 curl http://localhost:8080/healthz
+
+# 管理员登录，拿到一个 adm_ 开头的会话 token（只在响应里出现一次）
+curl -X POST http://localhost:8080/api/v1/admin/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"owner","password":"dev-admin-password-123"}'
+
+# 用会话 token 读待审队列、审核评论（不再需要 ADMIN_TOKEN）
+curl -H "Authorization: Bearer $TOKEN" \
+  'http://localhost:8080/api/v1/posts/hello-astro/comments?status=pending'
+curl -X PATCH http://localhost:8080/api/v1/comments/<id>/status \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"status":"approved"}'
 ```
 
 ## 目录结构
@@ -78,12 +99,28 @@ curl http://localhost:8080/healthz
 │   │   ├── migrations/         # 0001_counters.sql、0002_counter_constraints.sql
 │   │   ├── handler_http.go     # 路由注册与 handler
 │   │   └── dto.go              # 请求/响应形状
+│   ├── admin/                  # 管理员模块：账号、登录会话、审计查询
+│   │   ├── entity.go           # Account / Session、状态与字段不变量
+│   │   ├── password.go         # PBKDF2-HMAC-SHA256 摘要（自带 scheme/cost/salt）
+│   │   ├── token.go            # 会话 token 签发与摘要
+│   │   ├── port.go             # Repository / AuditReader
+│   │   ├── service.go          # 登录、会话、账号管理、改密、引导
+│   │   ├── repo_postgres.go    # PostgreSQL 仓储适配器
+│   │   ├── migrate.go          # 内嵌并应用本模块迁移
+│   │   ├── migrations/         # 0001_admin.sql
+│   │   ├── handler_http.go     # 路由、鉴权中间件、handler
+│   │   ├── webui.go            # /admin 服务端渲染控制台（Cookie + CSRF）
+│   │   ├── webui_templates/    # layout 与四个页面模板（内嵌进二进制）
+│   │   └── dto.go              # 请求/响应形状（不含任何密码字段）
 │   └── platform/               # 跨模块横切能力，不含业务
 │       ├── apperr/             # 全项目共享的错误类别与 ValidationError
+│       ├── audit/              # 审计日志：Event / Recorder / Store + 迁移
 │       ├── config/             # 环境变量解析与启动校验
+│       ├── cursor/             # 游标分页的编解码（admin / audit 共用）
 │       ├── httpkit/            # 路由、中间件、JSON 编解码、错误映射
 │       ├── postgres/           # 连接池、Executor 接口、DSN 脱敏、迁移执行器、约束冲突判定
 │       │   └── postgrestest/   # 集成测试连开发库 + 事务回滚的助手（只被测试引用）
+│       ├── idempotency/        # 幂等键存储（表 + 迁移）
 │       └── id/                 # 加密随机标识符
 ├── api/openapi.yaml            # API 契约
 ├── configs/.env.example        # 配置参考
@@ -95,16 +132,17 @@ curl http://localhost:8080/healthz
 ### 模块边界与依赖方向
 
 ```
-cmd ──┬──▶ comment ──┐
-      └──▶ count ────┴──▶ platform ──▶ platform/httpkit ──▶ platform/apperr
-                                        └─▶ platform/id
+cmd ──┬──▶ comment ──┬──┐
+      ├──▶ count ────┴──┴──▶ platform ──▶ platform/httpkit ──▶ platform/apperr
+      └──▶ admin ────┬──▶ platform/audit
+                     └──▶ platform/cursor
 ```
 
 - 模块内：`handler → service → entity`，`repo` 实现 `port.go` 里的接口，`service` 只依赖接口。
-- 模块间：单向依赖，模块之间互不引用。跨模块只使用对方导出的类型与服务。
-- `platform/*` 不依赖任何业务模块，否则会退化成上帝包。
+- 模块间：单向依赖，模块之间互不引用。跨模块只使用对方导出的类型与服务；`comment` 通过 `HTTPConfig.AdminAuthorizer` 接受 admin 会话，依赖的是 `platform/audit.Actor`，不是 admin 包。
+- `platform/*` 不依赖任何业务模块，否则会退化成上帝包。审计的写入端口和存储都在 `platform/audit`，admin 与 comment 各自通过它落一条记录。
 
-`cmd/server` 是唯一装配点：`postgres.Open` 建连接池 → `comment.Migrate` / `count.Migrate` 应用各自模块的 SQL → 注入仓储与服务。新增一张表只需要在对应模块的 `migrations/` 下加一个文件，不用改装配代码，也不用另一个模块知道它。
+`cmd/server` 是唯一装配点：`postgres.Open` 建连接池 → 各模块 `Migrate`（含 `platform/audit`、`platform/idempotency`）应用 SQL → 注入仓储与服务 → 从环境变量引导第一个管理员。新增一张表只需要在对应模块的 `migrations/` 下加一个文件，不用改装配代码，也不用另一个模块知道它。
 
 ### 关于单包模块
 
@@ -123,12 +161,24 @@ cmd ──┬──▶ comment ──┐
 | `POST` | `/api/v1/posts/{slug}/comments` | 发布评论（默认进入 pending），可带 `Idempotency-Key` |
 | `GET`  | `/api/v1/comments/counts?slugs=a,b` | 批量读取每篇的已审核评论数（卡片上的数字），最多 100 个 |
 | `GET`  | `/api/v1/comments/{id}` | 查询单条评论（未审核的对外 404） |
-| `PATCH` | `/api/v1/comments/{id}/status` | 改审核状态，需 `Authorization: Bearer $ADMIN_TOKEN` |
-| `DELETE` | `/api/v1/comments/{id}` | 删除评论及其所有回复：管理员口令，或创建时拿到的作者凭据 |
+| `PATCH` | `/api/v1/comments/{id}/status` | 改审核状态，需管理员会话（或遗留 `ADMIN_TOKEN`） |
+| `DELETE` | `/api/v1/comments/{id}` | 删除评论及其所有回复：管理员凭据，或创建时拿到的作者凭据 |
 | `GET`  | `/api/v1/count/site` | 站点累计访问量 / 访客数 |
 | `POST` | `/api/v1/count/site/visits` | 上报一次访问，返回最新计数 |
 | `GET`  | `/api/v1/count/posts?slugs=a,b` | 批量读取文章阅读量（列表页一次问完） |
 | `POST` | `/api/v1/count/posts/views` | 文章阅读量 +1（`{"slug":"..."}`），返回该文最新值 |
+| `POST` | `/api/v1/admin/auth/login` | 管理员登录，返回 `adm_` 会话 token（只在响应里出现一次） |
+| `POST` | `/api/v1/admin/auth/logout` | 注销当前会话（其他设备不受影响） |
+| `GET`  | `/api/v1/admin/auth/session` | 当前账号与会话（含到期时间） |
+| `GET`  | `/api/v1/admin/accounts` | 账号列表，游标分页，可按状态过滤 |
+| `POST` | `/api/v1/admin/accounts` | 新建账号（用户名小写唯一，密码 ≥12 位） |
+| `GET`  | `/api/v1/admin/accounts/{id}` | 读单个账号 |
+| `PATCH` | `/api/v1/admin/accounts/{id}` | 改显示名 / 启用停用 |
+| `DELETE` | `/api/v1/admin/accounts/{id}` | 删除账号（连带其所有会话） |
+| `POST` | `/api/v1/admin/accounts/{id}/password` | 改密或重置（自己的必须给当前密码） |
+| `GET`  | `/api/v1/admin/accounts/{id}/sessions` | 该账号的在线会话 |
+| `DELETE` | `/api/v1/admin/accounts/{id}/sessions/{sessionId}` | 踢掉某个会话 |
+| `GET`  | `/api/v1/admin/audit-logs` | 审计日志，游标分页，可按 `action` / `actorId` 过滤 |
 
 完整契约见 `api/openapi.yaml`。协议层的约定（与 `docs/前后端 API 通信规范.md` 对齐）：
 
@@ -155,6 +205,52 @@ cmd ──┬──▶ comment ──┐
 - **读待审队列要凭据**：`?status=pending|all` 只有带管理员口令才给，否则 `401` —— 静默返回空列表会让人以为没东西可审。
 - **`X-Request-Id` 回显在响应头和错误体里**，访问日志按**路由模板**（`/api/v1/comments/{id}`）记录，不按具体路径。跨源调用时它还出现在 `Access-Control-Expose-Headers` 里，否则前端 `headers.get()` 永远是 null。
 
+### 管理员与审计
+
+- **两种管理员凭据**：`POST /admin/auth/login` 换来的会话 token（`adm_` 开头，首选），以及遗留的静态 `ADMIN_TOKEN`（应急通道，常量时间比较、优先尝试）。两者都能审核/删除评论；静态口令没配时相关路由只在有 admin 模块的情况下挂载。
+- **会话是行，不是自包含 token**：库里只存 token 的 SHA-256 摘要。登出、停用账号、改密都会让下一次请求立即 401，而不是等 JWT 自己过期。过期是**绝对**的，不滑动——活跃的攻击者不该能把偷来的 token 一直续下去。
+- **密码用 PBKDF2-HMAC-SHA256（600k 次）**，摘要自带 `scheme$cost$salt$key`，因此以后提高成本不需要迁移：旧行按自己的参数验证。未知用户名也会对固定哑摘要跑一次同样的派生，且所有失败一律 `401` 且不带 detail——否则响应时间或错误文案就能枚举账号。
+- **自我保护**：不能停用或删除当前登录的账号，不能停用最后一个活跃管理员，不能删除最后一个账号（都是 `409` + 一句 detail）。改密会撤销该账号的**所有**会话，包括发起改密的那一个，客户端应回到登录页。
+- **审计覆盖面**：登录、登出、账号增删改、改密、会话撤销、评论审核与管理员删除都写 `audit_logs`，带操作者、来源 IP/UA 和动作相关 detail。**失败登录只进服务日志、不落表**：否则任何人可以拿错误口令把审计表刷爆。
+- **审计表没有指向账号的外键**：`actor_id` 保留但仍可 join，`actor_name` 是当时的用户名快照，账号删了以后这行仍然读得懂。
+- 账号列表、会话列表、审计列表都是 `no-store`：它们要么带凭据，要么描述凭据。
+
+### 创建管理员账号
+
+账号和密码**存在数据库里**：`admin_accounts.username` 与 `admin_accounts.password_hash`。密码是 PBKDF2-HMAC-SHA256 摘要（`pbkdf2-sha256$cost$salt$key`），没有明文，也没有可逆加密——服务端只做「重新派生 + 常数时间比较」。
+
+首次账号用同一个二进制创建（会先应用迁移，和启动路径一致）：
+
+| 命令 | 作用 |
+|---|---|
+| `go run ./cmd/server admin create -username owner` | 创建账号，生成 24 位随机密码并只打印一次 |
+| `echo '<密码>' \| go run ./cmd/server admin create -username owner -password-stdin` | 自己指定密码（管道，避免进 shell 历史） |
+| `go run ./cmd/server admin passwd -username owner` | 重置密码并撤销该账号全部会话 |
+| `go run ./cmd/server admin list` | 列出账号、状态与最近登录 |
+
+- 没有 `-password` 参数：命令行参数会留在 shell 历史和 `ps` 输出里。
+- 创建/重置都会写审计（操作者记为 `cli`），所以「谁在什么时候造了这个账号」查得到。
+- `ADMIN_BOOTSTRAP_USERNAME/PASSWORD` 仍然保留，但它只是**自动化部署**的替代路径（比如容器首次启动）；手动部署请用上面的命令，不必把密码放进环境变量。
+
+### 管理界面（/admin）
+
+服务端渲染的控制台，模板内嵌在二进制里，没有 Node、没有构建步骤、没有外部静态资源：
+
+| 页面 | 作用 |
+|---|---|
+| `GET /admin/login` | 登录表单；同一套账号体系，失败文案不区分账号不存在/密码错 |
+| `GET /admin/comments` | 待审队列（可切 approved/rejected/spam），每行可通过/拒绝/标垃圾/删除 |
+| `GET /admin/accounts` | 账号列表、新建、启停、改密、删除 |
+| `GET /admin/audit` | 审计日志，可按 `action` 过滤 |
+
+- **与 JSON API 是两套认证**：页面用 `HttpOnly; SameSite=Strict; Path=/admin` 的 cookie，API 仍只认 `Authorization: Bearer`。这样 API 不会因为浏览器自动带 cookie 而变成 CSRF 面。
+- **CSRF 用同步令牌**：令牌放在另一个 HttpOnly cookie 里，服务端渲染进每个表单的隐藏域，POST 时常量时间比较。SameSite 是第一道防线，令牌是第二道——只靠其中任何一个都不够。
+- **所有页面 `no-store`**，并带 `CSP: default-src 'none'`（只允许内联样式/脚本）、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。控制台不加载任何外部资源，策略就是按这个写的。
+- **表单是 POST + 303 重定向（PRG）**：刷新不会重复提交；错误用 `?err=<code>` 回到列表页，文案在服务端映射，URL 里不携带任意文本。
+- **审核动作由控制台写审计**，账号动作复用 admin service 自己的审计，操作者都取当前会话的账号。
+- 生产环境把 `ADMIN_COOKIE_SECURE=true` 打开；本地 `http://localhost` 必须保持关闭，否则浏览器不存 cookie，登录会静默失败。
+- 已知取舍：账号页只列前 200 个（不分页）、审核队列每页 50 条带「下一页」、删除按钮用原生 `confirm()`。评论正文按纯文本转义展示，不渲染 Markdown。
+
 ## 配置
 
 全部通过环境变量覆盖（见 `configs/.env.example`），启动时一次性校验并汇总所有错误。关键项：
@@ -172,7 +268,11 @@ cmd ──┬──▶ comment ──┐
 | `DATABASE_MAX_OPEN_CONNS` | `10` | 连接池上限 |
 | `DATABASE_MAX_IDLE_CONNS` | `5` | 空闲连接数，不得大于上限 |
 | `DATABASE_CONN_MAX_LIFETIME` | `30m` | 连接回收周期 |
-| `ADMIN_TOKEN` | 空 | 审核接口的 Bearer 口令，≥16 字符；为空时审核路由**不挂载** |
+| `ADMIN_TOKEN` | 空 | 遗留的审核 Bearer 口令，≥16 字符；为空时静态口令通道关闭（admin 会话仍可用） |
+| `ADMIN_SESSION_TTL` | `168h` | 管理员登录有效期。绝对过期，不滑动；服务端会把它夹在 15 分钟 ~ 30 天之间 |
+| `ADMIN_BOOTSTRAP_USERNAME` | 空 | 可选：自动化部署时引导首个账号；手动创建请用 `server admin create`。与下一项必须同时设置 |
+| `ADMIN_BOOTSTRAP_PASSWORD` | 空 | 可选：引导账号的密码，≥12 字符；账号表非空时忽略 |
+| `ADMIN_COOKIE_SECURE` | `false` | `/admin` 控制台 cookie 是否加 `Secure`。HTTPS 部署必须打开；本地 http 必须关闭 |
 
 ### 数据库
 
@@ -183,6 +283,7 @@ cmd ──┬──▶ comment ──┐
 - 多实例同时启动**由咨询锁串行化**（`pg_try_advisory_lock` + 有上限的等待）：每次部署都是几个实例一起起来，光靠 `CREATE TABLE IF NOT EXISTS` 挡不住「两个进程同时给同一张表加约束」——第二个会撞 `duplicate_object`，然后进程退出、被反复重启。拿不到锁时等 30 秒后报「另一个进程正在迁移」，失败比挂住好。整个迁移跑在一条**固定的连接**上，锁和工作在同一个会话里；解锁的 ctx 与调用方解耦，被取消也要把锁还回去（会话级咨询锁会跟着连接留在池里）。
 - 删除评论的级联由 `parent_id ... ON DELETE CASCADE` 完成，服务层不遍历子树；`parent_id` 上补了独立索引，否则每次级联都要全表扫一遍（PostgreSQL 只给主键和唯一约束建索引，外键列要自己加）。
 - 列表与计数共用一个复合索引 `(post_slug, status, created_at DESC, id DESC)`：过滤、排序、聚合都走它，不需要「先按 slug 取全部再排」的两段式。
+- 审核队列是**跨文章**读的（`WHERE status = ? ORDER BY created_at DESC, id DESC`），所以另有一条 `(status, created_at DESC, id DESC)`；没有它，队列查询会因为索引第一列是 slug 而退化成全表扫描加排序。仓储的 slug 过滤因此改成可选：空 slug 表示全部文章。
 - 「没有删除凭据」在库里是 `NULL` 而不是空字符串，配一条 `CHECK (delete_token_hash ~ '^[0-9a-f]{64}$')`；领域层仍用空串表示缺席，边界上互转。
 - 字段上限在库里也有一份 `CHECK`（slug 200、姓名 80、邮箱 254、网址 200、正文 2000 字符），服务层校验失效或被脚本绕过时数据库仍然拒绝。
 - 评论数用一条 `GROUP BY` 聚合回答整批 slug，不靠 `len(List(...))`。
@@ -193,7 +294,14 @@ cmd ──┬──▶ comment ──┐
 - 表结构的设计理由写在库里（`COMMENT ON`），`\d+ comments` 就能回答「主键为什么是字符串」「这个索引服务哪条查询」，不用去翻文档或问人。
 - `post_views` 补了 `created_at`（原来只有 `updated_at`，「这篇文章第一次被读是什么时候」答不了）。存量行按 `updated_at` 回填——那是上界，不是真实首次时间；用 `now()` 回填等于声称所有文章都是今天第一次被读。
 - 表设计复核过 [timescale/pg-aiguide](https://github.com/timescale/pg-aiguide) 的 PostgreSQL 规范：没有满足 hypertable 条件的时间序列表（评论、访客、阅读量都是「一行一实体」，不按时间追加），所以没引入 TimescaleDB。
-- 应用与迁移**应当是两个角色**：迁移要 DDL，应用只要 DML。`configs/roles.sql` 里有幂等的建角色与授权脚本（`psql -v app_password=… -f configs/roles.sql`），需要时执行。目前开发环境仍是 `postgres` 超级用户，属于登记在案的偏离（见下）。
+- - 管理员的表分成 `admin_accounts` 与 `admin_sessions`，而不是账号表里放一个「当前 token」列：一个人可以同时用笔记本和手机登录，注销其中一个不该把另一个也踢下线。
+- `admin_sessions.token_hash` 是唯一索引，也是每次鉴权的唯一一次查询；库里不存明文 token，所以数据库被拖走也不能拿来当会话用。
+- `admin_accounts.username` 有 `CHECK` 钉住小写与字符集，另有唯一索引：服务层的校验被脚本绕过时，数据库仍然拒绝第二个同名账号。`password_hash` 的 `CHECK` 只校验编码形状，不校验内容——内容由 PBKDF2 保证。
+- `expires_at` 是绝对时间，配一条 `CHECK (expires_at > created_at)`；启动时按 `expires_at` 清一次过期会话。已撤销的行留到过期才删，因为审计日志还要能点名是哪个会话做的操作。
+- `audit_logs` 是 append-only：`actor_id` 故意**不建外键**（账号删了，历史还要能读），`actor_name` 存当时的用户名快照，`detail` 用 `jsonb` 以便 `detail->>'status'` 这类查询。三个索引分别服务「全量倒序」「按 action 过滤」「按 actor 过滤」。
+- 审计写入是尽力而为：写失败只记一条 warning，不让「审计表满了」把审核动作变成 500。
+
+应用与迁移**应当是两个角色**：迁移要 DDL，应用只要 DML。`configs/roles.sql` 里有幂等的建角色与授权脚本（`psql -v app_password=… -f configs/roles.sql`），需要时执行。目前开发环境仍是 `postgres` 超级用户，属于登记在案的偏离（见下）。
 
 #### 有意保留的偏离
 
@@ -235,7 +343,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - 迁移执行器的两个用例绕不开 DDL，所以它们在开发库里建 `migrate_probe` / `migrate_broken` 这类探针表，`t.Cleanup` 负责删掉。
 - 多个包会被并行迁移，`postgrestest.Migrate` 用 `pg_advisory_lock` 串行化，避免两个会话同时建 `schema_migrations` 撞系统目录。
 
-当前覆盖率：`comment` 90.5%、`count` 93.8%、`config` 96.8%、`httpkit` 82.7%、`postgres` 75.6%、`idempotency` 71.4%、`id` 80%。
+当前覆盖率：`admin` 76.7%、`comment` 90.7%、`count` 93.8%、`audit` 84.2%、`cursor` 100%、`config` 94.6%、`httpkit` 82.7%、`postgres` 77.2%、`idempotency` 71.4%、`id` 80%。
 
 > Windows 下 `make test-race` 需要 cgo（安装 gcc，如 MinGW）；无 gcc 时用 `make test`。
 > 这条限制已登记在下方「规范例外」中。
@@ -250,6 +358,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - 请求体读取与解码统一走 `platform/httpkit.ReadBody` / `DecodeJSON`（18.3）：体积上限、`Content-Type` 校验、忽略未知字段、拒尾随数据，模块不再各写一份
 - 构造函数 fail fast + functional options（9.2）；时钟、随机源、日志器全部可注入（16）
 - `context` 首参贯穿阻塞操作（11）；HTTP 服务端显式超时 + 优雅停机（18.5）
+- 认证与授权：不透明会话 token + 摘要存储（可撤销），登录失败不区分原因；特权操作写审计，审计表 append-only 且容忍写入失败
 - 库表、索引、事务与迁移按 `docs/PostgreSQL规范.md`：`timestamptz` / `text` + `CHECK` / 外键列手工建索引 / 迁移一文件一事务且带 `lock_timeout`
 
 ### 规范例外
@@ -266,7 +375,9 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - [ ] 文章模块（`internal/post`）：实体、CRUD、slug 路由；slug 校验随之从 `comment`、`count` 收拢
 - [ ] 访客去重表需要清理策略：`site_visitors` 只增不减，长期运行要按天归档或加 TTL
 - [ ] 审核辅助：待审列表分页、spam 自动判定（`Moderator` 接口已留好插槽）
-- [ ] 限流：发评论与读计数都还没有速率限制，公开接口可能被刷（要按端点分级，且计数在多实例下需要共享存储；进程内桶只会在单实例时看起来有效）
+- [ ] 限流：发评论、读计数、**管理员登录**都还没有速率限制，公开接口可能被刷（要按端点分级，且计数在多实例下需要共享存储；进程内桶只会在单实例时看起来有效）
 - [ ] 幂等键的清理目前只在启动时 `Prune` 一次，长期运行应改成定时任务（`idempotency_keys` 只增不减）
+- [ ] 管理员会话清理同样只在启动时跑一次；审计日志 `audit_logs` 还没有保留策略，只增不减
+- [ ] 多角色 RBAC：现在刻意是**单角色**——每个管理员都能审核、管账号、读审计，靠「不能动自己 / 不能动最后一个」兜底。需要分级时再加角色与权限点
 - [ ] `/readyz` 目前只看进程存活，应加一次数据库 ping
-- [ ] 已有两个领域模块，`comment` 与 `count` 按 2.3 评估是否拆子包
+- [ ] 已有三个领域模块，`comment`、`count`、`admin` 按 2.3 评估是否拆子包

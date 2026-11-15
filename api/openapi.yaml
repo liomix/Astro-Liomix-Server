@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Astro Liomix Blog API
-  version: 0.6.0
+  version: 0.7.0
   description: >
     Comment and traffic-counting API for the blog. New comments enter moderation
     and are not part of the public listing until approved.
@@ -19,6 +19,11 @@ tags:
   - name: count
     description: Site-wide traffic counters.
   - name: health
+  - name: admin
+    description: >
+      Administrator console: accounts, sign-in sessions and the audit trail.
+      Everything except sign-in requires a session token from
+      POST /api/v1/admin/auth/login.
 
 paths:
   /healthz:
@@ -63,9 +68,10 @@ paths:
 
 
         Only approved comments are returned by default. Asking for any other
-        moderation state — or `all` — requires the admin token, because the
-        moderation queue is not public; without it the request is answered with
-        401 rather than an empty page that would read as "nothing to review".
+        moderation state — or `all` — requires an administrator credential,
+        because the moderation queue is not public; without one the request is
+        answered with 401 rather than an empty page that would read as "nothing
+        to review".
 
 
         Public pages are cacheable and revalidated with `ETag`; a credentialled
@@ -73,12 +79,13 @@ paths:
       security:
         - {}
         - adminToken: []
+        - adminSession: []
       parameters:
         - name: status
           in: query
           description: >
             Moderation filter. Defaults to `approved`. Any other value requires
-            the admin token.
+            an administrator credential.
           schema:
             type: string
             enum: [approved, pending, rejected, spam, all]
@@ -224,11 +231,12 @@ paths:
       operationId: getComment
       description: >
         A comment that is not approved is reported as 404 unless the request
-        carries the admin token: guessing an ID must not expose content that is
-        still awaiting moderation. That credentialled response is `no-store`.
+        carries an administrator credential: guessing an ID must not expose
+        content that is still awaiting moderation. That credentialled response is `no-store`.
       security:
         - {}
         - adminToken: []
+        - adminSession: []
       parameters:
         - name: id
           in: path
@@ -261,7 +269,8 @@ paths:
         would read as if they were top-level remarks.
 
 
-        Two credentials are accepted. The admin token deletes anything. The
+        Two credentials are accepted. An administrator credential deletes
+        anything. The
         `deleteToken` returned by POST deletes only the comment it was issued
         for — that is how a reader takes back something they wrote, without an
         account. A comment created without a token (imported data) can only be
@@ -273,6 +282,7 @@ paths:
         to the user about a comment that is already gone.
       security:
         - adminToken: []
+        - adminSession: []
         - commentAuthorToken: []
       parameters:
         - name: id
@@ -299,6 +309,7 @@ paths:
         `pending`; the difference is only what the moderator meant by it.
       security:
         - adminToken: []
+        - adminSession: []
       parameters:
         - name: id
           in: path
@@ -460,15 +471,441 @@ paths:
         "503":
           $ref: "#/components/responses/Unavailable"
 
+  /api/v1/admin/auth/login:
+    post:
+      tags: [admin]
+      summary: Sign in as an administrator
+      operationId: adminLogin
+      description: >
+        Exchanges a username and password for an opaque session token. The
+        token is shown once; the server keeps only its SHA-256 digest, which is
+        what makes sign-out and disabling an account take effect on the next
+        request instead of whenever a self-contained token expires.
+
+
+        The response is 200, not 201: a session is a credential, and there is
+        no useful Location to hand back.
+
+
+        Every failure is the same 401 with no detail — unknown account, wrong
+        password, disabled account. Distinguishing them would let anyone
+        enumerate valid usernames.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLoginRequest"
+      responses:
+        "200":
+          description: Signed in; the token is in the body and nowhere else
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminLoginResponse"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+
+  /api/v1/admin/auth/logout:
+    post:
+      tags: [admin]
+      summary: Sign out of the current session
+      operationId: adminLogout
+      description: >
+        Revokes the session that made the request. Other sessions of the same
+        account stay valid — signing out of a phone must not sign out a laptop.
+        Revoking twice answers 404: the second call changed nothing.
+      security:
+        - adminSession: []
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/auth/session:
+    get:
+      tags: [admin]
+      summary: Read the current session
+      operationId: adminCurrentSession
+      description: >
+        Answers who the token belongs to and when it expires, so a console can
+        show the operator's name without a second endpoint and can refresh
+        itself before the expiry rather than after a surprise 401.
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: The account and the session that made the request
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminCurrentSession"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/admin/accounts:
+    get:
+      tags: [admin]
+      summary: List administrator accounts
+      operationId: adminListAccounts
+      description: >
+        One page of accounts, newest first, ordered by `(createdAt, id)` so the
+        order is total and a cursor can continue it without repeating or
+        skipping a row.
+      security:
+        - adminSession: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter on one account state. Omit to list every state.
+          schema:
+            type: string
+            enum: [active, disabled]
+        - name: limit
+          in: query
+          description: Page size. Values above the server maximum are clamped to it.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          description: Opaque token from the previous page's `nextCursor`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of accounts
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAccountPage"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+    post:
+      tags: [admin]
+      summary: Create an administrator account
+      operationId: adminCreateAccount
+      description: >
+        New accounts start active and may sign in immediately. The username is
+        folded to lowercase and must be unique; a duplicate is a 409 rather
+        than a 422, because the value is well-formed and the state is what
+        collides.
+      security:
+        - adminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminCreateAccountRequest"
+      responses:
+        "201":
+          description: Account created
+          headers:
+            Location:
+              description: URL of the created account.
+              schema:
+                type: string
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAccount"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/StateConflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+
+  /api/v1/admin/accounts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [admin]
+      summary: Read one account
+      operationId: adminGetAccount
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: The account
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAccount"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [admin]
+      summary: Update a display name or an account status
+      operationId: adminUpdateAccount
+      description: >
+        Both fields are optional; omitted means unchanged. Disabling the account
+        making the request, or the last active administrator, is refused with
+        409 — either would lock the operator out of the console.
+      security:
+        - adminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminUpdateAccountRequest"
+      responses:
+        "200":
+          description: The account as stored
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminAccount"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StateConflict"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+    delete:
+      tags: [admin]
+      summary: Delete an account
+      operationId: adminDeleteAccount
+      description: >
+        Removes the account and every session it opened. Deleting oneself, or
+        the last account, is refused: either would leave nobody able to sign in
+        and no way back except a restart with the bootstrap variables set.
+      security:
+        - adminSession: []
+      responses:
+        "204":
+          description: Account deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/StateConflict"
+
+  /api/v1/admin/accounts/{id}/password:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [admin]
+      summary: Change or reset a password
+      operationId: adminChangePassword
+      description: >
+        Changing one's own password requires `currentPassword`, so a stolen
+        session cannot lock the owner out. An administrator resetting someone
+        else's does not: the audit trail records who did it.
+
+
+        Every session of the target is revoked afterwards, including the caller's
+        when they changed their own. A password change is the moment to assume
+        the old credential leaked, so the next request is a 401 and the client
+        signs in again.
+      security:
+        - adminSession: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminChangePasswordRequest"
+      responses:
+        "204":
+          description: Password changed; sessions revoked
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "415":
+          $ref: "#/components/responses/UnsupportedMedia"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+
+  /api/v1/admin/accounts/{id}/sessions:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      tags: [admin]
+      summary: List an account's live sessions
+      operationId: adminListSessions
+      description: >
+        Live sessions only, newest first, capped at 100. No cursor: a person has
+        a handful of sessions, and paging a set that never grows large would be
+        machinery for nothing.
+      security:
+        - adminSession: []
+      responses:
+        "200":
+          description: The live sessions
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AdminSessionList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/accounts/{id}/sessions/{sessionId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      tags: [admin]
+      summary: Revoke one session
+      operationId: adminRevokeSession
+      description: >
+        A session that belongs to another account is reported as 404 rather than
+        403: the ID is random, and confirming it exists would turn a guess into
+        an oracle.
+      security:
+        - adminSession: []
+      responses:
+        "204":
+          description: Session revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [admin]
+      summary: Read the operator audit trail
+      operationId: adminListAuditLogs
+      description: >
+        Append-only record of privileged actions, newest first, cursor-paginated
+        like every other listing. Filters are exact matches; the trail has no
+        time-range filter because a cursor already makes reading backwards
+        cheap.
+
+
+        The route exists only when the deployment exposes a reader; a server that
+        keeps a trail but does not serve it answers 404, not an empty page.
+      security:
+        - adminSession: []
+      parameters:
+        - name: action
+          in: query
+          description: >
+            Exact action name, e.g. `auth.login`, `account.create`,
+            `comment.moderate`.
+          schema:
+            type: string
+        - name: actorId
+          in: query
+          description: Account ID to filter on. Anonymous actions have no ID.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Page size. Values above the server maximum are clamped to it.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 200
+            default: 50
+        - name: cursor
+          in: query
+          description: Opaque token from the previous page's `nextCursor`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of the trail
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogPage"
+        "400":
+          $ref: "#/components/responses/MalformedRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+
 components:
   securitySchemes:
     adminToken:
       type: http
       scheme: bearer
       description: >
-        Shared secret from ADMIN_TOKEN. It moderates comments, reads the
-        unapproved queue, and deletes anything. When the server has no token
-        configured the moderation route is not mounted at all and answers 404.
+        Legacy shared secret from ADMIN_TOKEN. It moderates comments, reads the
+        unapproved queue, and deletes anything. The admin module's session token
+        (`adminSession`) is the normal credential; this one survives as an
+        emergency way in when the account table is the problem, and is checked
+        first, in constant time. When neither is configured the moderation route
+        is not mounted at all and answers 404.
     commentAuthorToken:
       type: http
       scheme: bearer
@@ -477,6 +914,15 @@ components:
         Scoped to that one comment: it cannot read, moderate or delete anything
         else. Never returned by a read, so it is lost if the client does not
         keep it.
+
+    adminSession:
+      type: http
+      scheme: bearer
+      description: >
+        Opaque session token returned once by POST /api/v1/admin/auth/login,
+        prefixed `adm_`. The server stores only its SHA-256 digest, so signing
+        out or disabling the account invalidates it on the next request. Send it
+        as `Authorization: Bearer <token>`.
 
   headers:
     Cacheable:
@@ -525,6 +971,16 @@ components:
       description: >
         The request collides with current state: an idempotency key reused with
         a different body, or a first request still running under that key.
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    StateConflict:
+      description: >
+        The request collides with current state: a duplicate username, or a
+        change that would leave the console unusable (disabling or deleting the
+        account making the request, disabling the last active administrator, or
+        deleting the last account).
       content:
         application/problem+json:
           schema:
@@ -829,3 +1285,212 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PostViews"
+
+    AdminLoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          description: Case-insensitive; stored folded to lowercase.
+        password:
+          type: string
+          format: password
+          writeOnly: true
+
+    AdminLoginResponse:
+      type: object
+      required: [token, expiresAt, account]
+      properties:
+        token:
+          type: string
+          description: >
+            The session token, shown exactly once. Store it where the client
+            keeps credentials and send it as a Bearer token.
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absolute expiry. Sessions do not slide.
+        account:
+          $ref: "#/components/schemas/AdminAccount"
+
+    AdminAccount:
+      type: object
+      required: [id, username, displayName, status, createdAt, updatedAt, lastLoginAt]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+          minLength: 3
+          maxLength: 40
+          pattern: "^[a-z0-9][a-z0-9._-]{2,39}$"
+          description: Lowercase, unique, and the value used to sign in.
+        displayName:
+          type: string
+          maxLength: 80
+          description: What the console shows. Carries the capitalisation usernames do not.
+        status:
+          type: string
+          enum: [active, disabled]
+          description: A disabled account cannot sign in and its live sessions stop authenticating.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        lastLoginAt:
+          type: [string, "null"]
+          format: date-time
+          description: >
+            Null for an account that has never signed in. That is different from
+            a timestamp: it means the credential has never been used.
+
+    AdminAccountPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminAccount"
+        nextCursor:
+          type: [string, "null"]
+          description: Null on the last page.
+
+    AdminCreateAccountRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 40
+          pattern: "^[a-z0-9][a-z0-9._-]{2,39}$"
+        displayName:
+          type: string
+          maxLength: 80
+          description: Defaults to the username when omitted.
+        password:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 12
+          maxLength: 200
+          description: >
+            Twelve characters is the floor. The value must not equal the
+            username and must not contain control characters.
+
+    AdminUpdateAccountRequest:
+      type: object
+      description: At least one field must be present; omitted fields are unchanged.
+      properties:
+        displayName:
+          type: string
+          maxLength: 80
+        status:
+          type: string
+          enum: [active, disabled]
+
+    AdminChangePasswordRequest:
+      type: object
+      required: [newPassword]
+      properties:
+        currentPassword:
+          type: string
+          format: password
+          writeOnly: true
+          description: Required when the caller is changing their own password.
+        newPassword:
+          type: string
+          format: password
+          writeOnly: true
+          minLength: 12
+          maxLength: 200
+
+    AdminSession:
+      type: object
+      required: [id, createdAt, lastSeenAt, expiresAt, ip, userAgent, current]
+      properties:
+        id:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+          description: Updated at most once every five minutes, not on every request.
+        expiresAt:
+          type: string
+          format: date-time
+        ip:
+          type: string
+          description: The connection address. Proxy headers are not trusted.
+        userAgent:
+          type: string
+        current:
+          type: boolean
+          description: True for the session that authenticated this request.
+
+    AdminCurrentSession:
+      type: object
+      required: [account, session]
+      properties:
+        account:
+          $ref: "#/components/schemas/AdminAccount"
+        session:
+          $ref: "#/components/schemas/AdminSession"
+
+    AdminSessionList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AdminSession"
+
+    AuditLogEntry:
+      type: object
+      required: [id, actorId, actorName, action, resource, resourceId, detail, ip, userAgent, createdAt]
+      properties:
+        id:
+          type: string
+        actorId:
+          type: string
+          description: Empty for actions no account performed, e.g. the initial bootstrap.
+        actorName:
+          type: string
+          description: Username at the time of the action, snapshotted so the row survives a rename or deletion.
+        action:
+          type: string
+          description: Dotted and stable, e.g. auth.login or comment.moderate.
+        resource:
+          type: string
+        resourceId:
+          type: string
+        detail:
+          type: object
+          additionalProperties: true
+          description: Action-specific context. Never contains secrets.
+        ip:
+          type: string
+        userAgent:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+
+    AuditLogPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLogEntry"
+        nextCursor:
+          type: [string, "null"]
+          description: Null on the last page.

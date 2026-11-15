@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
+	"github.com/liomix/astro-liomix-server/internal/platform/audit"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
 	"github.com/liomix/astro-liomix-server/internal/platform/idempotency"
 )
@@ -53,6 +54,18 @@ type HTTPConfig struct {
 	// comment instead of creating a second one. When nil the header is ignored
 	// and every retry creates a duplicate; cmd/server always provides a store.
 	Idempotency *idempotency.Store
+	// AdminAuthorizer resolves a credential that is not the static token — in
+	// practice, an admin-module session — to the administrator it belongs to.
+	// It is consulted after AdminToken, so the legacy token keeps working when
+	// the account table is unavailable. When nil, only AdminToken is accepted.
+	//
+	// The identity is returned rather than a bare bool because moderation is
+	// audited: "who approved this" is the question the trail exists to answer,
+	// and the handler cannot reconstruct it from a boolean.
+	AdminAuthorizer func(*http.Request) (*audit.Actor, bool)
+	// Auditor records moderation actions taken with an administrator
+	// credential. Optional: without it the routes work and keep no trail.
+	Auditor audit.Recorder
 }
 
 // RegisterRoutes mounts the comment endpoints on mux. The caller owns the
@@ -69,11 +82,13 @@ func RegisterRoutes(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg H
 	}
 
 	h := &commentHandler{
-		svc:         svc,
-		logger:      logger,
-		maxBodySize: cfg.MaxBodyBytes,
-		adminToken:  cfg.AdminToken,
-		idempotency: cfg.Idempotency,
+		svc:            svc,
+		logger:         logger,
+		maxBodySize:    cfg.MaxBodyBytes,
+		adminToken:     cfg.AdminToken,
+		authorizeAdmin: cfg.AdminAuthorizer,
+		auditor:        cfg.Auditor,
+		idempotency:    cfg.Idempotency,
 	}
 
 	mux.HandleFunc("GET /api/v1/posts/{slug}/comments", h.list)
@@ -90,22 +105,63 @@ func RegisterRoutes(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg H
 	// it with RequireBearer would lock out the second caller.
 	mux.HandleFunc("DELETE /api/v1/comments/{id}", h.delete)
 
-	// Moderation is privileged: without a configured token the route simply
-	// does not exist, which is the safe default for a deployment that never
-	// sets one.
-	if cfg.AdminToken != "" {
-		mux.Handle("PATCH /api/v1/comments/{id}/status",
-			httpkit.RequireBearer(logger, cfg.AdminToken, http.HandlerFunc(h.updateStatus)))
+	// Moderation is privileged: without any configured credential source the
+	// route simply does not exist, which is the safe default for a deployment
+	// that never sets one. The handler decides per request rather than being
+	// wrapped, because the credential may be the static token or a session
+	// issued by the admin module, and only the handler can try both.
+	if cfg.AdminToken != "" || cfg.AdminAuthorizer != nil {
+		mux.HandleFunc("PATCH /api/v1/comments/{id}/status", h.updateStatus)
 	}
 }
 
 // commentHandler serves the comment endpoints.
 type commentHandler struct {
-	svc         *Service
-	logger      *slog.Logger
-	maxBodySize int64
-	adminToken  string
-	idempotency *idempotency.Store
+	svc            *Service
+	logger         *slog.Logger
+	maxBodySize    int64
+	adminToken     string
+	authorizeAdmin func(*http.Request) (*audit.Actor, bool)
+	auditor        audit.Recorder
+	idempotency    *idempotency.Store
+}
+
+// adminActor resolves the administrator behind a request.
+//
+// The static token is tried first and resolves to an anonymous but named actor:
+// it has no account behind it, and pretending otherwise would put a blank id in
+// the trail. A session is then resolved through the injected authorizer.
+func (h *commentHandler) adminActor(r *http.Request) (*audit.Actor, bool) {
+	if httpkit.HasBearer(r, h.adminToken) {
+		return &audit.Actor{Name: "static-admin-token"}, true
+	}
+	if h.authorizeAdmin != nil {
+		return h.authorizeAdmin(r)
+	}
+	return nil, false
+}
+
+// recordAudit appends a moderation action, logging rather than failing when the
+// trail cannot be written: refusing to moderate because the audit table is full
+// would turn an observability problem into an outage.
+func (h *commentHandler) recordAudit(r *http.Request, actor *audit.Actor, action, resourceID string, detail map[string]any) {
+	if h.auditor == nil || actor == nil {
+		return
+	}
+	event := audit.Event{
+		Actor:      *actor,
+		Action:     action,
+		Resource:   "comment",
+		ResourceID: resourceID,
+		Detail:     detail,
+	}
+	if err := h.auditor.Record(r.Context(), event); err != nil {
+		h.logger.WarnContext(r.Context(), "record audit event",
+			slog.String("action", action),
+			slog.String("comment_id", resourceID),
+			slog.Any("error", err),
+		)
+	}
 }
 
 // createdResponse is a comment creation result, already encoded.
@@ -300,7 +356,7 @@ func (h *commentHandler) get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c.Status != StatusApproved {
-		if httpkit.HasBearer(r, h.adminToken) {
+		if _, ok := h.adminActor(r); ok {
 			// Unpublished content answered to a credential must not be stored
 			// anywhere: a shared cache would hand it to the next reader.
 			httpkit.WriteJSON(w, h.logger, http.StatusOK, toCommentPayload(c))
@@ -314,6 +370,12 @@ func (h *commentHandler) get(w http.ResponseWriter, r *http.Request) {
 
 // updateStatus changes a comment's moderation state.
 func (h *commentHandler) updateStatus(w http.ResponseWriter, r *http.Request) {
+	actor, ok := h.adminActor(r)
+	if !ok {
+		writeAuthChallenge(w, r, h.logger, `Bearer realm="moderator"`)
+		return
+	}
+
 	var req updateCommentStatusRequest
 	if err := httpkit.DecodeJSON(w, r, h.maxBodySize, &req); err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
@@ -325,6 +387,10 @@ func (h *commentHandler) updateStatus(w http.ResponseWriter, r *http.Request) {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
 	}
+	h.recordAudit(r, actor, "comment.moderate", c.ID, map[string]any{
+		"postSlug": c.PostSlug,
+		"status":   string(c.Status),
+	})
 	httpkit.WriteJSON(w, h.logger, http.StatusOK, toCommentPayload(c))
 }
 
@@ -338,10 +404,11 @@ func (h *commentHandler) updateStatus(w http.ResponseWriter, r *http.Request) {
 func (h *commentHandler) delete(w http.ResponseWriter, r *http.Request) {
 	commentID := r.PathValue("id")
 	presented := httpkit.BearerToken(r)
+	actor, isAdmin := h.adminActor(r)
 
 	var err error
 	switch {
-	case httpkit.HasBearer(r, h.adminToken):
+	case isAdmin:
 		err = h.svc.Delete(r.Context(), commentID)
 	case presented != "":
 		err = h.svc.DeleteOwned(r.Context(), commentID, presented)
@@ -356,6 +423,9 @@ func (h *commentHandler) delete(w http.ResponseWriter, r *http.Request) {
 		}
 		httpkit.WriteError(w, r, h.logger, err)
 		return
+	}
+	if isAdmin {
+		h.recordAudit(r, actor, "comment.delete", commentID, nil)
 	}
 	httpkit.WriteJSON(w, h.logger, http.StatusNoContent, nil)
 }
@@ -414,7 +484,7 @@ func (h *commentHandler) list(w http.ResponseWriter, r *http.Request) {
 		// Unmoderated states are the site owner's view, so the listing needs a
 		// credential — and once a credential is involved the response must not
 		// reach a shared cache.
-		if !httpkit.HasBearer(r, h.adminToken) {
+		if _, ok := h.adminActor(r); !ok {
 			writeAuthChallenge(w, r, h.logger, `Bearer realm="moderator"`)
 			return
 		}

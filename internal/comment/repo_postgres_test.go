@@ -342,3 +342,47 @@ func idsOf(comments []*comment.Comment) []string {
 	}
 	return ids
 }
+
+func TestPostgresRepositoryListsAcrossPosts(t *testing.T) {
+	repo := newPostgresRepository(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Microsecond)
+
+	seed := []*comment.Comment{
+		storedComment("c-alpha-1", "alpha", "", comment.StatusPending, now),
+		storedComment("c-beta-1", "beta", "", comment.StatusPending, now.Add(time.Second)),
+		storedComment("c-alpha-2", "alpha", "", comment.StatusApproved, now.Add(2*time.Second)),
+	}
+	for _, c := range seed {
+		if err := repo.Create(ctx, c); err != nil {
+			t.Fatalf("Create(%s) error = %v", c.ID, err)
+		}
+	}
+
+	// The moderation queue asks without a slug. That must mean "every post",
+	// not "the post whose slug is the empty string" — the latter matches no row
+	// and reads as an empty queue.
+	queue, err := repo.List(ctx, comment.Query{Status: comment.StatusPending, Limit: 10})
+	if err != nil {
+		t.Fatalf("List(queue) error = %v", err)
+	}
+	if len(queue) != 2 {
+		t.Fatalf("queue = %d comments, want 2 across both posts", len(queue))
+	}
+	if queue[0].ID != "c-beta-1" {
+		t.Errorf("newest queued comment = %q, want c-beta-1", queue[0].ID)
+	}
+
+	thread, err := repo.List(ctx, comment.Query{PostSlug: "alpha", Limit: 10})
+	if err != nil {
+		t.Fatalf("List(thread) error = %v", err)
+	}
+	if len(thread) != 2 {
+		t.Errorf("thread = %d comments, want the two on alpha", len(thread))
+	}
+	for _, c := range thread {
+		if c.PostSlug != "alpha" {
+			t.Errorf("thread contains a comment from %q", c.PostSlug)
+		}
+	}
+}
