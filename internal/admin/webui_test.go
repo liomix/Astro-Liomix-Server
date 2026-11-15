@@ -1343,3 +1343,50 @@ func TestConsoleMailTestUsesTheTypedAddress(t *testing.T) {
 		t.Errorf("sent to %v, want only the address that was typed", sent)
 	}
 }
+
+func TestConsoleTogglesAutoApprove(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	status, body := c.get(t, "/admin/comments")
+	if status != http.StatusOK {
+		t.Fatalf("GET /admin/comments = %d, want 200", status)
+	}
+	if !strings.Contains(body, "免审核：关") {
+		t.Fatal("the queue has no auto-approve switch, or it does not show its state")
+	}
+
+	status, location, postBody := c.post(t, "/admin/comments/policy", url.Values{
+		"csrf":        {c.csrf(t)},
+		"autoApprove": {"on"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("enable = %d, want 303 (body: %s)", status, postBody)
+	}
+	if !strings.Contains(location, "msg=policy_saved") {
+		t.Errorf("Location = %q, want the saved notice", location)
+	}
+	if policy, err := c.env.svc.CommentPolicy(t.Context()); err != nil {
+		t.Fatalf("CommentPolicy() error = %v", err)
+	} else if !policy.AutoApprove {
+		t.Error("the switch did not reach the service")
+	}
+
+	_, body = c.get(t, "/admin/comments")
+	if !strings.Contains(body, "免审核：开") {
+		t.Error("the page does not show the switch as on")
+	}
+
+	// Turning it back off is the same form with the box cleared.
+	if status, _, _ := c.post(t, "/admin/comments/policy", url.Values{
+		"csrf": {c.csrf(t)},
+	}); status != http.StatusSeeOther {
+		t.Fatalf("disable = %d, want 303", status)
+	}
+	if policy, err := c.env.svc.CommentPolicy(t.Context()); err != nil {
+		t.Fatalf("CommentPolicy() error = %v", err)
+	} else if policy.AutoApprove {
+		t.Error("an empty switch did not turn auto-approve off")
+	}
+}

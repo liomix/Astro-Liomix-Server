@@ -1024,6 +1024,27 @@ select {
 .feed__item:last-child {
   border-bottom: 0;
 }
+/* The queue is a stack of cards, not a ruled list: each pending comment is a
+   decision waiting to be made, so it gets an edge of its own. The activity feed
+   below stays a list — a log is read, a queue is worked through. */
+.feed--cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.feed--cards .feed__item {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  transition: border-color var(--dur-1) var(--ease),
+    background var(--dur-1) var(--ease);
+}
+.feed--cards .feed__item:hover {
+  border-color: var(--primary-line);
+  background: var(--surface);
+}
+
 .feed__avatar {
   display: inline-flex;
   align-items: center;
@@ -1269,6 +1290,36 @@ select {
   margin-left: auto;
   font-size: var(--text-xs);
   color: var(--text-subtle);
+}
+
+/* The queue's own switch, sitting in the bar the operator is already in. A
+   button rather than a checkbox because it is a mode, not a field to fill in:
+   one click flips it and the page comes back showing the new state. */
+.bulk__end {
+  margin-left: auto;
+}
+.bulk__toggle {
+  padding: 4px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--dur-1) var(--ease),
+    background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.bulk__toggle:hover {
+  border-color: var(--primary);
+  color: var(--primary-ink);
+}
+.bulk__toggle.is-on {
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-ink);
 }
 
 /* --- Empty state --------------------------------------------------------- */

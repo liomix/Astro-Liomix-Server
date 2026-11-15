@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,6 +47,8 @@ const (
 const (
 	actionLogin          = "auth.login"
 	actionSettingsUpdate = "settings.mail"
+	// actionCommentPolicy records a change to how new comments are admitted.
+	actionCommentPolicy  = "settings.comment"
 	actionLogout         = "auth.logout"
 	actionAccountCreate  = "account.create"
 	actionAccountUpdate  = "account.update"
@@ -633,6 +636,43 @@ func (s *Service) DeleteAccount(ctx context.Context, accountID string, actor aud
 		return fmt.Errorf("delete account %q: %w", accountID, err)
 	}
 	s.record(ctx, actor, actionAccountDelete, "account", account.ID, map[string]any{"username": account.Username})
+	return nil
+}
+
+// CommentPolicy is the moderation policy the console owns.
+//
+// It lives in the database rather than in the environment because "stop asking
+// me about every comment" is a decision made while looking at the queue, and a
+// redeploy is not an answer.
+type CommentPolicy struct {
+	// AutoApprove publishes new comments without review. Off by default: a blog
+	// should read what strangers wrote before it shows it to everyone.
+	AutoApprove bool
+}
+
+// settingCommentAutoApprove is the admin_settings key. Dotted and stable.
+const settingCommentAutoApprove = "comment.auto_approve"
+
+// CommentPolicy reads the moderation policy.
+func (s *Service) CommentPolicy(ctx context.Context) (CommentPolicy, error) {
+	values, err := s.repo.Settings(ctx)
+	if err != nil {
+		return CommentPolicy{}, fmt.Errorf("read comment policy: %w", err)
+	}
+	return CommentPolicy{AutoApprove: values[settingCommentAutoApprove] == "true"}, nil
+}
+
+// SetCommentPolicy stores the moderation policy.
+func (s *Service) SetCommentPolicy(ctx context.Context, policy CommentPolicy, actor audit.Actor) error {
+	values := map[string]string{
+		settingCommentAutoApprove: strconv.FormatBool(policy.AutoApprove),
+	}
+	if err := s.repo.PutSettings(ctx, values); err != nil {
+		return fmt.Errorf("write comment policy: %w", err)
+	}
+	s.record(ctx, actor, actionCommentPolicy, "settings", "comment", map[string]any{
+		"autoApprove": policy.AutoApprove,
+	})
 	return nil
 }
 

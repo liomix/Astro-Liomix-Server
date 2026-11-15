@@ -2,7 +2,6 @@
 <div class="page-head">
   <div>
     <h1 class="page-head__title">评论管理</h1>
-    <p class="page-head__sub">新评论默认进入待审，通过后才对读者可见。</p>
   </div>
   <form class="search" method="get" action="/admin/comments" role="search">
     <input type="hidden" name="status" value="{{.Status}}">
@@ -45,7 +44,19 @@
       {{template "iconTrash"}}删除
     </button>
   </div>
-  <span class="bulk__hint">通过会触发回复邮件提醒；删除不可撤销。</span>
+  <span class="bulk__end">
+    <button class="bulk__toggle {{if .AutoApprove}}is-on{{end}}" type="submit" form="policy-form"
+            name="autoApprove" value="{{if not .AutoApprove}}on{{end}}"
+            title="{{if .AutoApprove}}点击改为审核后发布{{else}}点击改为直接发布{{end}}">
+      免审核：{{if .AutoApprove}}开{{else}}关{{end}}
+    </button>
+  </span>
+</form>
+
+{{/* Owns the toggle above: the bulk bar is a form of its own, and a button can
+     submit a different one through the form attribute. */}}
+<form id="policy-form" method="post" action="/admin/comments/policy">
+  <input type="hidden" name="csrf" value="{{.CSRFToken}}">
 </form>
 
 <section class="panel">

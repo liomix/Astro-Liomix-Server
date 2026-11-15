@@ -729,3 +729,36 @@ func TestInitialCredential(t *testing.T) {
 		t.Errorf("InitialCredential(grace) = %q, %q, %v, %v; want grace", username, password, ok, err)
 	}
 }
+
+func TestCommentPolicyDefaultsOffAndPersists(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newTestEnv(t)
+
+	// A fresh install asks a human about every comment.
+	policy, err := env.svc.CommentPolicy(ctx)
+	if err != nil {
+		t.Fatalf("CommentPolicy() error = %v", err)
+	}
+	if policy.AutoApprove {
+		t.Error("auto-approve is on by default")
+	}
+
+	if err := env.svc.SetCommentPolicy(ctx, CommentPolicy{AutoApprove: true}, systemActor()); err != nil {
+		t.Fatalf("SetCommentPolicy() error = %v", err)
+	}
+	policy, err = env.svc.CommentPolicy(ctx)
+	if err != nil {
+		t.Fatalf("CommentPolicy() error = %v", err)
+	}
+	if !policy.AutoApprove {
+		t.Error("auto-approve did not persist")
+	}
+
+	// Turning the queue off is a privileged decision and stays in the trail.
+	if events := env.trail.eventsByAction(actionCommentPolicy); len(events) != 1 {
+		t.Fatalf("settings.comment events = %d, want 1", len(events))
+	} else if got := fmt.Sprint(events[0].Detail["autoApprove"]); got != "true" {
+		t.Errorf("detail.autoApprove = %v, want true", events[0].Detail["autoApprove"])
+	}
+}

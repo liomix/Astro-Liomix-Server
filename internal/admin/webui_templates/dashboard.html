@@ -54,7 +54,7 @@
       <a class="panel__link" href="/admin/comments?status=pending">全部 →</a>
     </header>
     {{if .Recent}}
-    <ul class="feed">
+    <ul class="feed feed--cards">
       {{range .Recent}}
       <li class="feed__item">
         <span class="feed__avatar" aria-hidden="true">{{firstRune .AuthorName}}</span>

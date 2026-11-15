@@ -124,6 +124,9 @@ type pageData struct {
 	// mail service, not whether SMTP is configured: an operator still needs
 	// the page to see that it is off.
 	HasMail bool
+	// AutoApprove is the console's moderation policy: publish new comments
+	// without review.
+	AutoApprove bool
 	// Mail is the outbound-mail configuration shown on the settings page.
 	Mail MailSettings
 	// NoAccounts is set on the login page when the account table is empty. A
@@ -245,6 +248,7 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 		mux.HandleFunc("POST /admin/comments/{id}/status", u.withSession(u.commentStatus))
 		mux.HandleFunc("POST /admin/comments/{id}/delete", u.withSession(u.commentDelete))
 		mux.HandleFunc("POST /admin/comments/bulk", u.withSession(u.commentsBulk))
+		mux.HandleFunc("POST /admin/comments/policy", u.withSession(u.commentsPolicy))
 	}
 }
 
@@ -502,6 +506,13 @@ func (u *webUI) commentsPage(w http.ResponseWriter, r *http.Request, p *Principa
 		counts = nil
 	}
 
+	// The policy is read after the list, so a failure to read it cannot cost the
+	// operator the queue: an unknown switch reads as "review required".
+	policy, err := u.svc.CommentPolicy(r.Context())
+	if err != nil {
+		u.logger.WarnContext(r.Context(), "read comment policy", slog.Any("error", err))
+	}
+
 	flash, errText := u.notices(r)
 	u.render(w, http.StatusOK, "comments", pageData{
 		Title: "评论审核", Nav: "comments", Account: p.Account,
@@ -510,7 +521,27 @@ func (u *webUI) commentsPage(w http.ResponseWriter, r *http.Request, p *Principa
 		Statuses: moderationStatuses, Status: status,
 		Comments: page.Items, NextCursor: page.NextCursor,
 		Keyword: keyword, Counts: counts,
+		AutoApprove: policy.AutoApprove,
 	})
+}
+
+// commentsPolicy flips the auto-approve switch.
+//
+// It is a form rather than a bare link so a prefetching browser cannot publish
+// without a click, and it carries no state of its own: the switch is the only
+// field, and its absence means "off".
+func (u *webUI) commentsPolicy(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !u.parseForm(w, r) || !u.csrfOK(r) {
+		u.redirect(w, r, "/admin/comments?err=csrf")
+		return
+	}
+	policy := CommentPolicy{AutoApprove: r.PostFormValue("autoApprove") != ""}
+	if err := u.svc.SetCommentPolicy(r.Context(), policy, u.actor(r, p)); err != nil {
+		u.logger.ErrorContext(r.Context(), "save comment policy", slog.Any("error", err))
+		u.redirect(w, r, "/admin/comments?err=error")
+		return
+	}
+	u.redirect(w, r, "/admin/comments?msg=policy_saved")
 }
 
 // commentStatus applies one moderation decision and records who made it.
@@ -1180,6 +1211,7 @@ var flashMessages = map[string]string{
 	"mail_test_sent":   "SMTP 已接收这封测试邮件，去收件箱（含垃圾箱）确认一下。",
 	"bulk_partial":     "批量操作已执行，但有部分条目因保护规则被跳过。",
 	"activity_deleted": "已删除选中的活动记录。",
+	"policy_saved":     "已保存审核策略。",
 }
 
 var errorMessages = map[string]string{

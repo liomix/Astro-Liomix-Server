@@ -124,9 +124,28 @@ func run() error {
 		comment.WithLogger(logger),
 		comment.WithPageSize(cfg.Comment.DefaultPageSize, cfg.Comment.MaxPageSize),
 	}
-	if moderator, ok := newSpamModerator(cfg, logger); ok {
-		commentOptions = append(commentOptions, comment.WithModerator(moderator))
+	// The review policy is always attached: the console can flip auto-approve
+	// at any time, so the decision cannot be frozen at startup. The spam filter
+	// is one of its inputs and may be absent.
+	var spamFilter comment.Moderator
+	if filter, ok := newSpamModerator(cfg, logger); ok {
+		spamFilter = filter
 	}
+
+	// Assigned once the admin service exists, a few lines below: the comment
+	// service is built first. Nil means "review required", not a crash.
+	var readAutoApprove func(context.Context) (bool, error)
+
+	commentOptions = append(commentOptions, comment.WithModerator(reviewPolicy{
+		spam: spamFilter,
+		autoApprove: func(ctx context.Context) (bool, error) {
+			if readAutoApprove == nil {
+				return false, nil
+			}
+			return readAutoApprove(ctx)
+		},
+		logger: logger,
+	}))
 	// Notifications are queued, not sent inline: approving a comment must not
 	// wait for an SMTP handshake, and a mail server that is down must not turn
 	// an approval into an error. The notifier is always attached and decides
@@ -164,6 +183,17 @@ func run() error {
 	)
 	if err != nil {
 		return fmt.Errorf("build admin service: %w", err)
+	}
+
+	// The switch lives in the database, so the console changes it without a
+	// restart. A read failure means "review": losing a pending comment into the
+	// queue costs a click, publishing something unwanted costs the site.
+	readAutoApprove = func(ctx context.Context) (bool, error) {
+		policy, err := adminService.CommentPolicy(ctx)
+		if err != nil {
+			return false, err
+		}
+		return policy.AutoApprove, nil
 	}
 
 	if pruned, err := adminService.PruneExpiredSessions(startupCtx); err != nil {
