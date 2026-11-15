@@ -52,13 +52,15 @@ func testPasswordHash() string {
 
 func storedAccount(id, username string, status admin.AccountStatus, at time.Time) *admin.Account {
 	return &admin.Account{
-		ID:           id,
-		Username:     username,
-		DisplayName:  username,
-		PasswordHash: testPasswordHash(),
-		Status:       status,
-		CreatedAt:    at.UTC(),
-		UpdatedAt:    at.UTC(),
+		ID:              id,
+		Username:        username,
+		DisplayName:     username,
+		PasswordHash:    testPasswordHash(),
+		InitialPassword: "initial-" + id,
+		Status:          status,
+		PasswordInitial: true,
+		CreatedAt:       at.UTC(),
+		UpdatedAt:       at.UTC(),
 	}
 }
 
@@ -94,6 +96,12 @@ func TestPostgresAccountRoundTrip(t *testing.T) {
 	}
 	if !got.LastLoginAt.IsZero() {
 		t.Error("lastLoginAt is not the zero time for an account that never signed in")
+	}
+	if !got.PasswordInitial {
+		t.Error("passwordIsInitial did not survive the round trip")
+	}
+	if got.InitialPassword != "initial-a-1" {
+		t.Errorf("initialPassword = %q, want the stored plaintext", got.InitialPassword)
 	}
 	if !got.CreatedAt.Equal(now) {
 		t.Errorf("createdAt = %v, want %v", got.CreatedAt, now)
@@ -203,6 +211,11 @@ func TestPostgresAccountUpdateAndDelete(t *testing.T) {
 
 	ada.DisplayName = "Ada L."
 	ada.Status = admin.StatusDisabled
+	// A self-service password change clears the flag and the plaintext copy;
+	// the repository must persist both, otherwise the console keeps reminding
+	// forever and keeps a credential it no longer needs.
+	ada.PasswordInitial = false
+	ada.InitialPassword = ""
 	ada.UpdatedAt = now.Add(time.Minute)
 	if err := repo.UpdateAccount(ctx, ada); err != nil {
 		t.Fatalf("UpdateAccount() error = %v", err)
@@ -213,6 +226,12 @@ func TestPostgresAccountUpdateAndDelete(t *testing.T) {
 	}
 	if updated.DisplayName != "Ada L." || updated.Status != admin.StatusDisabled {
 		t.Errorf("account = %+v, want the updated values", updated)
+	}
+	if updated.PasswordInitial {
+		t.Error("passwordIsInitial was not persisted by UpdateAccount")
+	}
+	if updated.InitialPassword != "" {
+		t.Error("clearing the plaintext password did not reach the database")
 	}
 
 	if err := repo.UpdateLastLogin(ctx, grace.ID, now.Add(2*time.Minute)); err != nil {

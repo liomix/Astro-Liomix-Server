@@ -122,6 +122,9 @@ func run() error {
 		admin.WithSessionTTL(cfg.Admin.SessionTTL),
 		admin.WithAuditor(auditStore),
 		admin.WithAuditReader(auditStore),
+		// The plaintext of an initial password is only kept where the console is
+		// a local development tool; production never writes it.
+		admin.WithPlaintextInitialPassword(cfg.Env == config.EnvDevelopment),
 	)
 	if err != nil {
 		return fmt.Errorf("build admin service: %w", err)
@@ -149,6 +152,15 @@ func run() error {
 		}
 	}
 
+	// A development database gets the default administrator so a fresh checkout
+	// can sign in without running a command first. It is seeded after the
+	// bootstrap path, so an explicitly configured account still wins.
+	if cfg.Env == config.EnvDevelopment {
+		if err := seedDevelopmentAdmin(startupCtx, adminService, logger); err != nil {
+			return err
+		}
+	}
+
 	// The router owns health probes, the 404 fallback and the middleware stack;
 	// each module mounts its own routes through the callback, so it never needs
 	// to know about middleware.
@@ -173,9 +185,11 @@ func run() error {
 			// under /admin, next to the bearer-authenticated JSON API under
 			// /api/v1/admin.
 			admin.RegisterWebUI(mux, logger, adminService, admin.WebUIConfig{
-				Moderation:    moderationQueue{svc: commentService},
-				Auditor:       auditStore,
-				SecureCookies: cfg.Admin.CookieSecure,
+				Moderation:               moderationQueue{svc: commentService},
+				Auditor:                  auditStore,
+				SecureCookies:            cfg.Admin.CookieSecure,
+				ShowInitialCredentials:   cfg.Env == config.EnvDevelopment,
+				PreferredInitialUsername: developmentAdminUsername,
 			})
 		},
 	)

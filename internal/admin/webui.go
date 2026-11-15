@@ -65,6 +65,16 @@ type WebUIConfig struct {
 	// the console is served over HTTPS; leaving it off locally is what lets
 	// http://localhost work.
 	SecureCookies bool
+	// ShowInitialCredentials prints the initial account and password on the
+	// login page while the account still holds them. It is a development
+	// convenience with a real cost: the login page is unauthenticated, so
+	// anyone who can reach it can read the credential. cmd/server enables it
+	// only when APP_ENV is development.
+	ShowInitialCredentials bool
+	// PreferredInitialUsername is shown ahead of other unclaimed accounts, so
+	// the seeded default administrator keeps appearing after more accounts are
+	// added. Empty falls back to "only if exactly one account qualifies".
+	PreferredInitialUsername string
 }
 
 // pageData is the view model every page shares. One struct rather than one per
@@ -81,6 +91,20 @@ type pageData struct {
 	Error     string
 	// HasModeration hides the comment tab when no queue is wired.
 	HasModeration bool
+	// NoAccounts is set on the login page when the account table is empty. A
+	// form that always answers "wrong password" would send a new operator
+	// looking for a typo instead of telling them to create the account.
+	NoAccounts bool
+	// LoginTip is set on the login page when accounts exist, to explain where
+	// the credential comes from. It never names an account or a password: the
+	// page is unauthenticated.
+	LoginTip bool
+	// InitialUsername and InitialPassword are filled only in development and
+	// only while exactly one account still holds an initial password. They are
+	// rendered on the unauthenticated login page, which is the whole point and
+	// the whole risk.
+	InitialUsername string
+	InitialPassword string
 
 	Statuses   []string
 	Status     string
@@ -95,11 +119,13 @@ type pageData struct {
 
 // webUI serves the operator console.
 type webUI struct {
-	svc           *Service
-	moderation    ModerationQueue
-	auditor       audit.Recorder
-	logger        *slog.Logger
-	secureCookies bool
+	svc                      *Service
+	moderation               ModerationQueue
+	auditor                  audit.Recorder
+	logger                   *slog.Logger
+	secureCookies            bool
+	showInitialCredentials   bool
+	preferredInitialUsername string
 }
 
 // RegisterWebUI mounts the console on mux under /admin.
@@ -113,11 +139,13 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 		logger = slog.Default()
 	}
 	u := &webUI{
-		svc:           svc,
-		moderation:    cfg.Moderation,
-		auditor:       cfg.Auditor,
-		logger:        logger,
-		secureCookies: cfg.SecureCookies,
+		svc:                      svc,
+		moderation:               cfg.Moderation,
+		auditor:                  cfg.Auditor,
+		logger:                   logger,
+		secureCookies:            cfg.SecureCookies,
+		showInitialCredentials:   cfg.ShowInitialCredentials,
+		preferredInitialUsername: cfg.PreferredInitialUsername,
 	}
 
 	mux.HandleFunc("GET /admin", u.root)
@@ -188,10 +216,41 @@ func (u *webUI) loginPage(w http.ResponseWriter, r *http.Request) {
 		u.redirect(w, r, "/admin/comments")
 		return
 	}
-	u.render(w, http.StatusOK, "login", pageData{
-		Title:     "登录",
-		CSRFToken: u.csrfToken(w, r),
-	})
+	u.render(w, http.StatusOK, "login", u.loginData(w, r))
+}
+
+// loginData builds the login page model, including the first-run hint.
+func (u *webUI) loginData(w http.ResponseWriter, r *http.Request) pageData {
+	// The login page is where a sign-out and a self password change land, so it
+	// has to read the same ?msg/?err codes the other pages do; otherwise the
+	// redirect explains nothing.
+	flash, errText := u.notices(r)
+	data := pageData{Title: "登录", CSRFToken: u.csrfToken(w, r), Flash: flash, Error: errText}
+
+	if u.showInitialCredentials {
+		username, password, ok, err := u.svc.InitialCredential(r.Context(), u.preferredInitialUsername)
+		if err != nil {
+			u.logger.WarnContext(r.Context(), "resolve initial credential", slog.Any("error", err))
+		} else if ok {
+			data.InitialUsername = username
+			data.InitialPassword = password
+			return data
+		}
+	}
+
+	hasAccounts, err := u.svc.HasAccounts(r.Context())
+	if err != nil {
+		// A failed count is not a reason to hide the form; the hint is simply
+		// omitted rather than guessed at.
+		u.logger.WarnContext(r.Context(), "check for administrator accounts", slog.Any("error", err))
+		return data
+	}
+	if hasAccounts {
+		data.LoginTip = true
+	} else {
+		data.NoAccounts = true
+	}
+	return data
 }
 
 // loginSubmit exchanges the form for a session cookie.
@@ -232,11 +291,9 @@ func (u *webUI) loginSubmit(w http.ResponseWriter, r *http.Request) {
 // renderLoginError re-renders the form with a message; the status is the one the
 // browser should show in devtools, not a redirect, so the back button behaves.
 func (u *webUI) renderLoginError(w http.ResponseWriter, r *http.Request, status int, message string) {
-	u.render(w, status, "login", pageData{
-		Title:     "登录",
-		Error:     message,
-		CSRFToken: u.csrfToken(w, r),
-	})
+	data := u.loginData(w, r)
+	data.Error = message
+	u.render(w, status, "login", data)
 }
 
 // logout revokes the session behind the cookie and clears it.

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Astro Liomix Blog API
-  version: 0.7.0
+  version: 0.7.1
   description: >
     Comment and traffic-counting API for the blog. New comments enter moderation
     and are not part of the public listing until approved.
@@ -1316,7 +1316,7 @@ components:
 
     AdminAccount:
       type: object
-      required: [id, username, displayName, status, createdAt, updatedAt, lastLoginAt]
+      required: [id, username, displayName, status, passwordIsInitial, createdAt, updatedAt, lastLoginAt]
       properties:
         id:
           type: string
@@ -1334,6 +1334,12 @@ components:
           type: string
           enum: [active, disabled]
           description: A disabled account cannot sign in and its live sessions stop authenticating.
+        passwordIsInitial:
+          type: boolean
+          description: >
+            True while the account still uses the password it was created with,
+            or the one an administrator reset it to. Clients should nudge the
+            operator to change it; the console shows a standing reminder.
         createdAt:
           type: string
           format: date-time

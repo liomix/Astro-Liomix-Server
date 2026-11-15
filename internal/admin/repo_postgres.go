@@ -32,7 +32,7 @@ func NewPostgresRepository(db postgres.Executor) *PostgresRepository {
 
 // Projections shared by every read, in the order the scanners expect.
 const (
-	accountColumns = `id, username, display_name, password_hash, status, created_at, updated_at, last_login_at`
+	accountColumns = `id, username, display_name, password_hash, initial_password, status, password_is_initial, created_at, updated_at, last_login_at`
 	sessionColumns = `id, account_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent`
 )
 
@@ -47,19 +47,25 @@ func scanAccount(row rowScanner) (*Account, error) {
 	// last_login_at is NULL for an account that has never signed in. The
 	// domain represents that as the zero time; NULL is the only place the
 	// difference is visible, and it is the right place.
-	var lastLogin sql.NullTime
+	var (
+		lastLogin       sql.NullTime
+		initialPassword sql.NullString
+	)
 	if err := row.Scan(
 		&a.ID,
 		&a.Username,
 		&a.DisplayName,
 		&a.PasswordHash,
+		&initialPassword,
 		&a.Status,
+		&a.PasswordInitial,
 		&a.CreatedAt,
 		&a.UpdatedAt,
 		&lastLogin,
 	); err != nil {
 		return nil, err
 	}
+	a.InitialPassword = initialPassword.String
 	if lastLogin.Valid {
 		a.LastLoginAt = lastLogin.Time.UTC()
 	}
@@ -103,12 +109,14 @@ func (r *PostgresRepository) CreateAccount(ctx context.Context, a *Account) erro
 	}
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO admin_accounts (`+accountColumns+`)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
 		a.ID,
 		a.Username,
 		a.DisplayName,
 		a.PasswordHash,
+		nullString(a.InitialPassword),
 		string(a.Status),
+		a.PasswordInitial,
 		a.CreatedAt.UTC(),
 		a.UpdatedAt.UTC(),
 		nullTime(a.LastLoginAt),
@@ -198,16 +206,19 @@ func (r *PostgresRepository) UpdateAccount(ctx context.Context, a *Account) erro
 	}
 	result, err := r.db.ExecContext(ctx, `
 		UPDATE admin_accounts
-		SET username = $2, display_name = $3, password_hash = $4, status = $5,
-		    updated_at = $6, last_login_at = $7
+		SET username = $2, display_name = $3, password_hash = $4,
+		    initial_password = $5, status = $6, updated_at = $7,
+		    last_login_at = $8, password_is_initial = $9
 		WHERE id = $1`,
 		a.ID,
 		a.Username,
 		a.DisplayName,
 		a.PasswordHash,
+		nullString(a.InitialPassword),
 		string(a.Status),
 		a.UpdatedAt.UTC(),
 		nullTime(a.LastLoginAt),
+		a.PasswordInitial,
 	)
 	if err != nil {
 		if postgres.IsUniqueViolation(err) {
@@ -421,4 +432,13 @@ func nullTime(t time.Time) any {
 		return nil
 	}
 	return t.UTC()
+}
+
+// nullString maps the domain's empty string to SQL NULL. "No plaintext kept"
+// is an absence, not a zero-length password.
+func nullString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

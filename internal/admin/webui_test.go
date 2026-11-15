@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
+	"github.com/liomix/astro-liomix-server/internal/platform/audit"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
 )
 
@@ -207,8 +208,14 @@ func (c *console) post(t *testing.T, path string, form url.Values) (int, string,
 	return resp.StatusCode, resp.Header.Get("Location"), string(body)
 }
 
-// login signs in through the form and fails the test when it cannot.
+// login signs in as the owner with the fixture password.
 func (c *console) login(t *testing.T) {
+	t.Helper()
+	c.loginAs(t, "owner", testPassword)
+}
+
+// loginAs signs in through the form and fails the test when it cannot.
+func (c *console) loginAs(t *testing.T, username, password string) {
 	t.Helper()
 
 	if status, body := c.get(t, "/admin/login"); status != http.StatusOK {
@@ -216,8 +223,8 @@ func (c *console) login(t *testing.T) {
 	}
 	status, location, body := c.post(t, "/admin/login", url.Values{
 		"csrf":     {c.csrf(t)},
-		"username": {"owner"},
-		"password": {testPassword},
+		"username": {username},
+		"password": {password},
 	})
 	if status != http.StatusSeeOther {
 		t.Fatalf("login POST = %d, want 303 (body: %s)", status, body)
@@ -625,4 +632,195 @@ func TestConsoleRequiresModerationForCommentPages(t *testing.T) {
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404 when no moderation queue is wired", resp.StatusCode)
 	}
+}
+
+// TestConsoleShowsInitialPasswordReminder is the first-run nudge: an account
+// created by the CLI still holds a generated password, and the console says so
+// above every page until it is changed.
+func TestConsoleShowsInitialPasswordReminder(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	for _, path := range []string{"/admin/comments", "/admin/accounts", "/admin/audit"} {
+		status, body := c.get(t, path)
+		if status != http.StatusOK {
+			t.Fatalf("%s = %d, want 200", path, status)
+		}
+		if !strings.Contains(body, "仍在使用初始密码") {
+			t.Errorf("%s does not carry the initial-password reminder", path)
+		}
+		if !strings.Contains(body, "去修改") {
+			t.Errorf("%s reminder has no link to the account page", path)
+		}
+		// The reminder is a toast fixed to the top centre of the viewport, not
+		// an inline banner inside the page body.
+		if !strings.Contains(body, `class="toasts"`) {
+			t.Errorf("%s has no toast container", path)
+		}
+	}
+}
+
+func TestConsoleReminderClearsAfterPasswordChange(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	accounts, _, err := c.env.svc.ListAccounts(t.Context(), AccountQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	var self *Account
+	for _, account := range accounts {
+		if account.Username == "owner" {
+			self = account
+		}
+	}
+	if self == nil {
+		t.Fatal("owner account not found")
+	}
+
+	status, _, body := c.post(t, "/admin/accounts/"+self.ID+"/password", url.Values{
+		"csrf":            {c.csrf(t)},
+		"currentPassword": {testPassword},
+		"password":        {"another-long-password"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("password change = %d, want 303 (body: %s)", status, body)
+	}
+
+	c.loginAs(t, "owner", "another-long-password")
+	status, body = c.get(t, "/admin/comments")
+	if status != http.StatusOK {
+		t.Fatalf("comments page = %d, want 200", status)
+	}
+	if strings.Contains(body, "仍在使用初始密码") {
+		t.Error("the reminder survived a password change")
+	}
+}
+
+func TestConsoleLoginHintsWhenNoAccountsExist(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnv(t)
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if !strings.Contains(string(body), "还没有管理员账号") {
+		t.Error("the login page does not tell a new operator that no account exists")
+	}
+	if !strings.Contains(string(body), "server admin create") {
+		t.Error("the hint does not name the command that creates the first account")
+	}
+}
+
+func TestConsoleLoginPageShowsPostChangeNotice(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+
+	// A self password change lands back on the login page with a code; the page
+	// has to render it, or the operator is signed out with no explanation.
+	status, body := c.get(t, "/admin/login?msg=password_changed")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(body, "密码已更新") {
+		t.Error("the login page does not render the password-changed notice")
+	}
+}
+
+func TestConsoleLoginPageExplainsWhereCredentialsComeFrom(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+
+	status, body := c.get(t, "/admin/login")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if !strings.Contains(body, "首次登录") {
+		t.Error("the login page does not explain where the first credential comes from")
+	}
+	if !strings.Contains(body, "server admin create") {
+		t.Error("the tip does not name the command that creates the account")
+	}
+	// The page is unauthenticated: it must not name an account or echo a
+	// password, even though it knows accounts exist.
+	if strings.Contains(body, testPassword) || strings.Contains(body, "owner") {
+		t.Error("the login page leaks an account name or password")
+	}
+}
+
+func TestConsoleLoginShowsInitialCredentialsInDevelopment(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnv(t)
+	if _, err := env.svc.Bootstrap(t.Context(), "owner", "Owner", testPassword); err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{
+			ShowInitialCredentials: true,
+		})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	body := getBody(t, server.URL+"/admin/login")
+	if !strings.Contains(body, "仍在使用初始密码") {
+		t.Error("the login page does not say the password is still initial")
+	}
+	if !strings.Contains(body, "owner") || !strings.Contains(body, testPassword) {
+		t.Error("the login page does not show the initial account and password")
+	}
+
+	// Changing the password retires both the plaintext copy and the display.
+	accounts, _, err := env.svc.ListAccounts(t.Context(), AccountQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAccounts() error = %v", err)
+	}
+	if err := env.svc.ChangePassword(t.Context(), accounts[0].ID, ChangePasswordInput{
+		CurrentPassword: testPassword,
+		NewPassword:     "another-long-password",
+	}, audit.Actor{ID: accounts[0].ID, Name: accounts[0].Username}); err != nil {
+		t.Fatalf("ChangePassword() error = %v", err)
+	}
+
+	body = getBody(t, server.URL+"/admin/login")
+	if strings.Contains(body, testPassword) {
+		t.Error("the login page still shows the retired password")
+	}
+	if !strings.Contains(body, "首次登录") {
+		t.Error("the login page does not fall back to the generic hint")
+	}
+}
+
+// getBody fetches a URL and returns its body.
+func getBody(t *testing.T, url string) string {
+	t.Helper()
+
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read %s: %v", url, err)
+	}
+	return string(body)
 }

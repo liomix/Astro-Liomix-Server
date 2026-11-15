@@ -76,9 +76,15 @@ func TestBootstrapCreatesOnlyOnce(t *testing.T) {
 	ctx := context.Background()
 	env := newTestEnv(t)
 
+	if has, err := env.svc.HasAccounts(ctx); err != nil || has {
+		t.Fatalf("HasAccounts() = %v, %v before bootstrap; want false, nil", has, err)
+	}
 	created, err := env.svc.Bootstrap(ctx, "owner", "Owner", testPassword)
 	if err != nil {
 		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if has, err := env.svc.HasAccounts(ctx); err != nil || !has {
+		t.Errorf("HasAccounts() = %v, %v after bootstrap; want true, nil", has, err)
 	}
 	if !created {
 		t.Fatal("Bootstrap() = false on an empty table, want true")
@@ -276,6 +282,12 @@ func TestCreateAccount(t *testing.T) {
 		if !account.Active() {
 			t.Error("a new account is not active")
 		}
+		if !account.PasswordInitial {
+			t.Error("a new account is not marked as using its initial password")
+		}
+		if account.InitialPassword != testPassword {
+			t.Error("the plaintext initial password was not kept for the console")
+		}
 	})
 
 	t.Run("duplicate username is a conflict", func(t *testing.T) {
@@ -437,6 +449,16 @@ func TestChangePassword(t *testing.T) {
 	if _, _, _, err := env.svc.Login(ctx, LoginInput{Username: "ada", Password: "another-long-password"}); err != nil {
 		t.Errorf("Login() with the new password error = %v", err)
 	}
+	reloaded, err := env.svc.GetAccount(ctx, ada.ID)
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if reloaded.PasswordInitial {
+		t.Error("a self-service password change left the initial-password flag set")
+	}
+	if reloaded.InitialPassword != "" {
+		t.Error("a self-service password change kept the plaintext password")
+	}
 }
 
 func TestAdminCanResetAnotherPassword(t *testing.T) {
@@ -460,6 +482,16 @@ func TestAdminCanResetAnotherPassword(t *testing.T) {
 	}
 	if _, _, _, err := env.svc.Login(ctx, LoginInput{Username: "grace", Password: "another-long-password"}); err != nil {
 		t.Errorf("Login() with the reset password error = %v", err)
+	}
+	reloaded, err := env.svc.GetAccount(ctx, grace.ID)
+	if err != nil {
+		t.Fatalf("GetAccount() error = %v", err)
+	}
+	if !reloaded.PasswordInitial {
+		t.Error("an administrator reset did not re-arm the initial-password flag for the target")
+	}
+	if reloaded.InitialPassword != "another-long-password" {
+		t.Error("an administrator reset did not keep the new plaintext for the target to see")
 	}
 }
 
@@ -608,5 +640,37 @@ func TestAuditTrailListing(t *testing.T) {
 
 	if !env.svc.HasAuditTrail() {
 		t.Error("HasAuditTrail() = false with a reader configured")
+	}
+}
+
+func TestInitialCredential(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newTestEnv(t)
+
+	if _, _, ok, err := env.svc.InitialCredential(ctx, ""); err != nil || ok {
+		t.Fatalf("InitialCredential() = %v, %v on an empty table; want false, nil", ok, err)
+	}
+
+	env.mustCreate(t, "ada")
+	username, password, ok, err := env.svc.InitialCredential(ctx, "")
+	if err != nil {
+		t.Fatalf("InitialCredential() error = %v", err)
+	}
+	if !ok || username != "ada" || password != testPassword {
+		t.Errorf("InitialCredential() = %q, %q, %v; want ada and the fixture password", username, password, ok)
+	}
+
+	// Two unclaimed accounts make the answer ambiguous, and the login page is
+	// unauthenticated: showing one of them would be a guess.
+	env.mustCreate(t, "grace")
+	if _, _, ok, _ := env.svc.InitialCredential(ctx, ""); ok {
+		t.Error("InitialCredential() picked one of two initial accounts")
+	}
+	// A named preference resolves the ambiguity: that is how the seeded default
+	// administrator keeps being shown after another account is added.
+	username, password, ok, err = env.svc.InitialCredential(ctx, "grace")
+	if err != nil || !ok || username != "grace" || password != testPassword {
+		t.Errorf("InitialCredential(grace) = %q, %q, %v, %v; want grace", username, password, ok, err)
 	}
 }

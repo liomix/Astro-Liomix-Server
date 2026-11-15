@@ -65,11 +65,40 @@
   button.link { border: 0; background: none; padding: 0; color: var(--muted); }
   button.link:hover { text-decoration: underline; background: none; }
   button.danger { color: var(--danger); border-color: #f0cfcb; }
-  .err, .ok {
-    padding: 10px 14px; border-radius: 8px; margin-bottom: 16px; font-size: 13px;
+
+  /* Toasts: fixed to the top centre of the viewport, above the page. They are
+     the console's only notification channel — there are no inline banners, so
+     one place answers "did that work?" on every page. */
+  .toasts {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+    z-index: 50; width: min(560px, calc(100% - 32px));
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
   }
-  .err { background: #fdecea; color: var(--danger); border: 1px solid #f5c6c0; }
-  .ok { background: #e8f5ee; color: var(--ok); border: 1px solid #bfe3cd; }
+  .toast {
+    pointer-events: auto; display: flex; align-items: flex-start; gap: 12px;
+    padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px;
+    background: #fff; box-shadow: 0 10px 30px rgba(16, 24, 40, .12);
+    font-size: 13px; animation: toast-in .18s ease-out;
+  }
+  .toast.out { opacity: 0; transform: translateY(-8px); transition: opacity .18s, transform .18s; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
+  .toast.warn { background: #fffaeb; border-color: #f2d08a; color: #7a4d00; }
+  .toast.info { background: #eef3ff; border-color: #cfe0ff; color: #1b3a6b; }
+  .toast.err { background: #fdecea; border-color: #f5c6c0; color: var(--danger); }
+  .toast.ok { background: #e8f5ee; border-color: #bfe3cd; color: var(--ok); }
+  .toast .grow { flex: 1 1 auto; }
+  .toast strong { display: block; margin-bottom: 2px; }
+  .toast code { background: rgba(0, 0, 0, .06); padding: 1px 5px; border-radius: 4px; }
+  .toast a.toast-action {
+    font-weight: 600; color: inherit; text-decoration: underline;
+    white-space: nowrap; padding-top: 2px;
+  }
+  .toast button.toast-close {
+    border: 0; background: none; color: inherit; opacity: .55;
+    font-size: 18px; line-height: 1; padding: 0 2px; cursor: pointer;
+  }
+  .toast button.toast-close:hover { opacity: 1; background: none; }
+
   table { width: 100%; border-collapse: collapse; background: var(--panel); }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
   th { font-size: 12px; color: var(--muted); font-weight: 600; background: #fafbfc; }
@@ -98,6 +127,58 @@
 </style>
 </head>
 <body>
+<div class="toasts" id="toasts" aria-live="polite">
+  {{if .Account}}{{if .Account.PasswordInitial}}
+  <div class="toast warn" role="status">
+    <div class="grow">
+      <strong>仍在使用初始密码</strong>
+      账号 <span class="mono">{{.Account.Username}}</span> 的密码是创建时生成的，请改成只有你知道的密码。
+    </div>
+    <a class="toast-action" href="/admin/accounts">去修改</a>
+    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+  </div>
+  {{end}}{{end}}
+  {{if .InitialUsername}}
+  <div class="toast warn" role="status">
+    <div class="grow">
+      <strong>仍在使用初始密码</strong>
+      账号 <code>{{.InitialUsername}}</code>，初始密码 <code>{{.InitialPassword}}</code>。<br>
+      登录后请立即修改；改密后这条提示会消失。
+    </div>
+    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+  </div>
+  {{end}}
+  {{if .LoginTip}}
+  <div class="toast info" role="status">
+    <div class="grow">
+      <strong>首次登录？</strong>
+      管理员账号由服务器上的 <code>server admin create</code> 创建，初始密码只显示一次；登录后请立即修改。
+    </div>
+    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+  </div>
+  {{end}}
+  {{if .NoAccounts}}
+  <div class="toast warn" role="status">
+    <div class="grow">
+      <strong>还没有管理员账号</strong>
+      在服务器上运行 <code>server admin create -username &lt;name&gt;</code> 创建第一个账号。
+    </div>
+    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+  </div>
+  {{end}}
+  {{if .Error}}
+  <div class="toast err" role="alert" data-timeout="10000">
+    <div class="grow">{{.Error}}</div>
+    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+  </div>
+  {{end}}
+  {{if .Flash}}
+  <div class="toast ok" role="status" data-timeout="6000">
+    <div class="grow">{{.Flash}}</div>
+    <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
+  </div>
+  {{end}}
+</div>
 {{if .Account}}
 <header class="top">
   <nav>
@@ -115,9 +196,27 @@
 </header>
 {{end}}
 <main>
-  {{if .Error}}<div class="err">{{.Error}}</div>{{end}}
-  {{if .Flash}}<div class="ok">{{.Flash}}</div>{{end}}
   {{template "content" .}}
 </main>
+<script>
+  // Toast behaviour: auto-dismiss the ones that opt in with data-timeout, and
+  // let every toast be closed by hand. Nothing else on the page needs script.
+  (function () {
+    var stack = document.getElementById('toasts');
+    if (!stack) return;
+    function close(toast) {
+      if (!toast) return;
+      toast.classList.add('out');
+      window.setTimeout(function () { toast.remove(); }, 180);
+    }
+    stack.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-dismiss]');
+      if (button) close(button.closest('.toast'));
+    });
+    Array.prototype.forEach.call(stack.querySelectorAll('.toast[data-timeout]'), function (toast) {
+      window.setTimeout(function () { close(toast); }, Number(toast.getAttribute('data-timeout')));
+    });
+  })();
+</script>
 </body>
 </html>{{end}}

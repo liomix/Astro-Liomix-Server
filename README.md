@@ -217,7 +217,18 @@ cmd ──┬──▶ comment ──┬──┐
 
 ### 创建管理员账号
 
-账号和密码**存在数据库里**：`admin_accounts.username` 与 `admin_accounts.password_hash`。密码是 PBKDF2-HMAC-SHA256 摘要（`pbkdf2-sha256$cost$salt$key`），没有明文，也没有可逆加密——服务端只做「重新派生 + 常数时间比较」。
+账号和密码**存在数据库里**：`admin_accounts.username` 与 `admin_accounts.password_hash`。密码是 PBKDF2-HMAC-SHA256 摘要（`pbkdf2-sha256$cost$salt$key`），登录时重新派生再比较。
+
+**开发环境（`APP_ENV=development`）启动时会自动确保默认管理员存在**：
+
+```
+账号：admin
+密码：astroadmin123
+```
+
+登录页会直接显示这组初始凭据，直到密码被修改。它只出现在开发环境：生产不预置该账号、不保存明文、也不在登录页显示。这个账号被删除后，下次以开发环境启动会重新创建。
+
+生产/正式环境请用下面的命令创建，密码不会进环境变量：
 
 首次账号用同一个二进制创建（会先应用迁移，和启动路径一致）：
 
@@ -249,6 +260,11 @@ cmd ──┬──▶ comment ──┬──┐
 - **表单是 POST + 303 重定向（PRG）**：刷新不会重复提交；错误用 `?err=<code>` 回到列表页，文案在服务端映射，URL 里不携带任意文本。
 - **审核动作由控制台写审计**，账号动作复用 admin service 自己的审计，操作者都取当前会话的账号。
 - 生产环境把 `ADMIN_COOKIE_SECURE=true` 打开；本地 `http://localhost` 必须保持关闭，否则浏览器不存 cookie，登录会静默失败。
+- **通知统一是弹窗**：页面顶部居中（`position: fixed`）的 toast，成功 6 秒、错误 10 秒自动消失，也可手点关闭；不再有页面内嵌的横幅。
+- **初始密码提醒**：`admin_accounts.password_is_initial` 为 true 时，每个页面都会弹一条常驻提醒并带「去修改」链接，直到账号自己把密码改掉。管理员在控制台重置别人的密码会把它重新置为 true——目标用户仍然需要自己选一个密码。API 的账号对象也暴露 `passwordIsInitial`。
+- **开发环境的登录页会显示初始凭据**：当恰好一个账号还持有初始密码、且服务运行在开发环境时，登录页顶部直接显示「账号 admin / 初始密码 astroadmin123」。这是刻意的开发便利，登录页本身是未认证页面——**不要把开发环境的控制台暴露到公网**。
+- **生产环境什么都不显示**：`APP_ENV=production` 时不预置默认账号、不写 `initial_password` 明文、登录页只给通用提示（账号由 `server admin create` 创建，忘记密码用 `server admin passwd` 重置）。
+- **初始密码提醒**：登录后每个页面顶部都会常驻「仍在使用初始密码」，带「去修改」链接，直到账号自己改密；改密后这行提示和 `initial_password` 明文一起消失。
 - 已知取舍：账号页只列前 200 个（不分页）、审核队列每页 50 条带「下一页」、删除按钮用原生 `confirm()`。评论正文按纯文本转义展示，不渲染 Markdown。
 
 ## 配置
@@ -300,6 +316,7 @@ cmd ──┬──▶ comment ──┬──┐
 - `expires_at` 是绝对时间，配一条 `CHECK (expires_at > created_at)`；启动时按 `expires_at` 清一次过期会话。已撤销的行留到过期才删，因为审计日志还要能点名是哪个会话做的操作。
 - `audit_logs` 是 append-only：`actor_id` 故意**不建外键**（账号删了，历史还要能读），`actor_name` 存当时的用户名快照，`detail` 用 `jsonb` 以便 `detail->>'status'` 这类查询。三个索引分别服务「全量倒序」「按 action 过滤」「按 actor 过滤」。
 - 审计写入是尽力而为：写失败只记一条 warning，不让「审计表满了」把审核动作变成 500。
+- `admin_accounts.initial_password` 是唯一保存明文密码的地方，用途只有一个：开发环境的登录页展示初始凭据。账号自己改密会把它清空，管理员重置会写入新值；**只有开发环境会写它**（`WithPlaintextInitialPassword`），生产始终为 NULL。它是登记在案的安全取舍：在那段时间里，任何能打开登录页或读到库的人都能拿到这个密码。
 
 应用与迁移**应当是两个角色**：迁移要 DDL，应用只要 DML。`configs/roles.sql` 里有幂等的建角色与授权脚本（`psql -v app_password=… -f configs/roles.sql`），需要时执行。目前开发环境仍是 `postgres` 超级用户，属于登记在案的偏离（见下）。
 
@@ -343,7 +360,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - 迁移执行器的两个用例绕不开 DDL，所以它们在开发库里建 `migrate_probe` / `migrate_broken` 这类探针表，`t.Cleanup` 负责删掉。
 - 多个包会被并行迁移，`postgrestest.Migrate` 用 `pg_advisory_lock` 串行化，避免两个会话同时建 `schema_migrations` 撞系统目录。
 
-当前覆盖率：`admin` 76.7%、`comment` 90.7%、`count` 93.8%、`audit` 84.2%、`cursor` 100%、`config` 94.6%、`httpkit` 82.7%、`postgres` 77.2%、`idempotency` 71.4%、`id` 80%。
+当前覆盖率：`admin` 76.6%、`comment` 90.7%、`count` 93.8%、`audit` 84.2%、`cursor` 100%、`config` 94.6%、`httpkit` 82.7%、`postgres` 77.2%、`idempotency` 71.4%、`id` 80%。
 
 > Windows 下 `make test-race` 需要 cgo（安装 gcc，如 MinGW）；无 gcc 时用 `make test`。
 > 这条限制已登记在下方「规范例外」中。

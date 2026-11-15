@@ -64,6 +64,10 @@ type Service struct {
 	now         func() time.Time
 	sessionTTL  time.Duration
 	logger      *slog.Logger
+	// storePlaintext keeps the initial password so the development console can
+	// show it. Off in production: a plaintext credential at rest is a risk that
+	// only local convenience justifies.
+	storePlaintext bool
 }
 
 // Option configures a Service. Options are applied in order, so later ones win.
@@ -134,6 +138,15 @@ func WithSessionTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithPlaintextInitialPassword controls whether the plaintext of an initial
+// password is kept for the console to display. Defaults to true; cmd/server
+// turns it off outside development.
+func WithPlaintextInitialPassword(keep bool) Option {
+	return func(s *Service) {
+		s.storePlaintext = keep
+	}
+}
+
 // WithPasswordCost sets the PBKDF2 iteration count. It exists for tests: the
 // production value deliberately costs a few hundred milliseconds per login.
 func WithPasswordCost(iterations int) Option {
@@ -151,12 +164,13 @@ func NewService(repo Repository, opts ...Option) (*Service, error) {
 		return nil, errors.New("admin: repository is required")
 	}
 	s := &Service{
-		repo:       repo,
-		hasher:     defaultHasher,
-		ids:        id.RandomGenerator{},
-		now:        time.Now,
-		sessionTTL: defaultSessionTTL,
-		logger:     slog.Default(),
+		repo:           repo,
+		hasher:         defaultHasher,
+		ids:            id.RandomGenerator{},
+		now:            time.Now,
+		sessionTTL:     defaultSessionTTL,
+		logger:         slog.Default(),
+		storePlaintext: true,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -368,8 +382,17 @@ func (s *Service) createAccount(ctx context.Context, in CreateAccountInput) (*Ac
 		DisplayName:  displayName,
 		PasswordHash: digest,
 		Status:       StatusActive,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		// The password was chosen by whoever ran the create command, not by the
+		// person who will use the account. The console keeps reminding until
+		// they change it.
+		PasswordInitial: true,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if s.storePlaintext {
+		// Kept only so the development login page can show the credential a new
+		// operator has to type. Cleared on the first self-service change.
+		account.InitialPassword = in.Password
 	}
 	if err := s.repo.CreateAccount(ctx, account); err != nil {
 		if errors.Is(err, apperr.ErrConflict) {
@@ -419,6 +442,50 @@ func (s *Service) GetAccount(ctx context.Context, accountID string) (*Account, e
 		return nil, fmt.Errorf("get account %q: %w", accountID, err)
 	}
 	return account, nil
+}
+
+// InitialCredential returns an account that still holds its initial password
+// and whose plaintext is available.
+//
+// preferredUsername wins when it matches, which is how the development default
+// administrator keeps being shown after the operator adds a second account. With
+// no match it answers only when exactly one account qualifies: the login page is
+// unauthenticated, and picking one of several credentials would be a guess
+// rather than a hint.
+func (s *Service) InitialCredential(ctx context.Context, preferredUsername string) (username, password string, ok bool, err error) {
+	accounts, _, err := s.ListAccounts(ctx, AccountQuery{Limit: maxAccountPageSize})
+	if err != nil {
+		return "", "", false, fmt.Errorf("initial credential: %w", err)
+	}
+
+	preferred := NormalizeUsername(preferredUsername)
+	matches := make([]*Account, 0, 2)
+	for _, account := range accounts {
+		if !account.PasswordInitial || account.InitialPassword == "" {
+			continue
+		}
+		if preferred != "" && account.Username == preferred {
+			return account.Username, account.InitialPassword, true, nil
+		}
+		matches = append(matches, account)
+	}
+	if len(matches) != 1 {
+		return "", "", false, nil
+	}
+	return matches[0].Username, matches[0].InitialPassword, true, nil
+}
+
+// HasAccounts reports whether any account exists, in any state.
+//
+// It exists for the console's first-run hint: a login form that always answers
+// "wrong password" on an empty database tells a new operator to keep trying
+// instead of telling them to create the account.
+func (s *Service) HasAccounts(ctx context.Context) (bool, error) {
+	count, err := s.repo.CountAccounts(ctx, "")
+	if err != nil {
+		return false, fmt.Errorf("count accounts: %w", err)
+	}
+	return count > 0, nil
 }
 
 // GetAccountByUsername returns one account by its username.
@@ -610,6 +677,18 @@ func (s *Service) ChangePassword(ctx context.Context, accountID string, in Chang
 	}
 	now := s.timestamp()
 	account.PasswordHash = digest
+	// A self-service change clears the reminder and the plaintext copy. An
+	// administrator resetting someone else's password arms both again, because
+	// the target still has to pick a password only they know.
+	account.PasswordInitial = !self
+	switch {
+	case self:
+		account.InitialPassword = ""
+	case s.storePlaintext:
+		account.InitialPassword = in.NewPassword
+	default:
+		account.InitialPassword = ""
+	}
 	account.UpdatedAt = now
 	if err := s.repo.UpdateAccount(ctx, account); err != nil {
 		return fmt.Errorf("change password for %q: %w", accountID, err)

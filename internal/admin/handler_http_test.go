@@ -130,9 +130,10 @@ func TestLoginHTTP(t *testing.T) {
 		t.Error("lastLoginAt is null after a successful sign-in")
 	}
 	// The digest must never travel, even though the response describes the
-	// account fully enough for a console header.
-	if strings.Contains(rec.Body.String(), "password") {
-		t.Error("the login response mentions a password field")
+	// account fully enough for a console header. `passwordIsInitial` is a
+	// boolean flag, not a credential, so it is allowed.
+	if strings.Contains(rec.Body.String(), "passwordHash") || strings.Contains(rec.Body.String(), "pbkdf2-") {
+		t.Error("the login response carries the password digest")
 	}
 }
 

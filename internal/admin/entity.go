@@ -71,12 +71,22 @@ type Account struct {
 	ID          string
 	Username    string
 	DisplayName string
-	// PasswordHash is the encoded PBKDF2 digest. The plaintext is never stored
-	// and never logged; see password.go for the format.
+	// PasswordHash is the encoded PBKDF2 digest. See password.go for the format.
 	PasswordHash string
-	Status       AccountStatus
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// InitialPassword is the plaintext of the password the account was created
+	// with (or was last reset to), kept only so the development console can
+	// show it on the login page until the account changes it. Empty means "not
+	// available"; it is never returned by the JSON API and cleared on a
+	// self-service change.
+	InitialPassword string
+	Status          AccountStatus
+	// PasswordInitial is true while the account still uses the password it was
+	// created with (or the one an administrator reset it to). The console
+	// reminds the operator to change it; the API exposes the flag so any other
+	// client can do the same. It is a fact about the credential, not a policy.
+	PasswordInitial bool
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 	// LastLoginAt is zero for an account that has never signed in. Storage
 	// keeps NULL for that case, so "never" is not confused with 1970.
 	LastLoginAt time.Time

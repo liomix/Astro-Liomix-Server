@@ -165,16 +165,21 @@ func adminList(args []string) error {
 		}
 
 		writer := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(writer, "ID\t用户名\t状态\t最近登录\t创建时间")
+		fmt.Fprintln(writer, "ID\t用户名\t状态\t密码\t最近登录\t创建时间")
 		for _, account := range accounts {
 			lastLogin := "从未"
 			if !account.LastLoginAt.IsZero() {
 				lastLogin = account.LastLoginAt.Local().Format("2006-01-02 15:04")
 			}
-			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n",
+			password := "已改"
+			if account.PasswordInitial {
+				password = "初始"
+			}
+			fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n",
 				account.ID,
 				account.Username,
 				account.Status,
+				password,
 				lastLogin,
 				account.CreatedAt.Local().Format("2006-01-02 15:04"),
 			)
@@ -209,6 +214,7 @@ func withAdminService(fn func(context.Context, *admin.Service) error) error {
 	svc, err := admin.NewService(admin.NewPostgresRepository(db),
 		admin.WithLogger(logger),
 		admin.WithAuditor(audit.NewStore(db)),
+		admin.WithPlaintextInitialPassword(cfg.Env == config.EnvDevelopment),
 	)
 	if err != nil {
 		return err

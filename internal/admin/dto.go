@@ -38,24 +38,28 @@ type changePasswordRequest struct {
 // credential, and no client has a reason to see one. LastLoginAt is a pointer
 // so "never signed in" is an explicit null rather than a zero timestamp.
 type accountPayload struct {
-	ID          string     `json:"id"`
-	Username    string     `json:"username"`
-	DisplayName string     `json:"displayName"`
-	Status      string     `json:"status"`
-	CreatedAt   time.Time  `json:"createdAt"`
-	UpdatedAt   time.Time  `json:"updatedAt"`
-	LastLoginAt *time.Time `json:"lastLoginAt"`
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"displayName"`
+	Status      string `json:"status"`
+	// PasswordIsInitial tells a client to nudge the operator: the account is
+	// still on the password it was created with.
+	PasswordIsInitial bool       `json:"passwordIsInitial"`
+	CreatedAt         time.Time  `json:"createdAt"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+	LastLoginAt       *time.Time `json:"lastLoginAt"`
 }
 
 // toAccountPayload maps the entity to its wire form, dropping private fields.
 func toAccountPayload(a *Account) accountPayload {
 	payload := accountPayload{
-		ID:          a.ID,
-		Username:    a.Username,
-		DisplayName: a.DisplayName,
-		Status:      string(a.Status),
-		CreatedAt:   a.CreatedAt,
-		UpdatedAt:   a.UpdatedAt,
+		ID:                a.ID,
+		Username:          a.Username,
+		DisplayName:       a.DisplayName,
+		Status:            string(a.Status),
+		PasswordIsInitial: a.PasswordInitial,
+		CreatedAt:         a.CreatedAt,
+		UpdatedAt:         a.UpdatedAt,
 	}
 	if !a.LastLoginAt.IsZero() {
 		// A copy per call: taking the address of the entity's field would
