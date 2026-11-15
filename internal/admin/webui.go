@@ -3,9 +3,11 @@ package admin
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,12 +31,30 @@ import (
 //go:embed webui_templates/*.html
 var webUITemplates embed.FS
 
+//go:embed webui_assets/css/bootstrap.min.css webui_assets/css/app.css webui_assets/js/app.js webui_assets/js/theme.js
+var webUIAssets embed.FS
+
+// Console assets are embedded and served with an immutable cache policy: the
+// URL carries a content hash, so a deploy that changes the CSS changes the URL
+// and no browser can pair new markup with old styles.
+var (
+	bootstrapCSS        = mustAsset("webui_assets/css/bootstrap.min.css")
+	consoleCSS          = mustAsset("webui_assets/css/app.css")
+	consoleJS           = mustAsset("webui_assets/js/app.js")
+	consoleThemeJS      = mustAsset("webui_assets/js/theme.js")
+	consoleAssetVersion = assetHash(bootstrapCSS, consoleCSS, consoleJS, consoleThemeJS)
+)
+
 // Cookie and form names used by the console. They are unexported because no
 // other package should depend on the wire details of these pages.
 const (
 	sessionCookieName = "admin_session"
 	csrfCookieName    = "admin_csrf"
 	csrfFormField     = "csrf"
+	// snoozeCookieName suppresses the initial-password reminder after the
+	// operator dismisses it. It is not a credential and not HttpOnly: the page
+	// script sets it when the toast is closed.
+	snoozeCookieName = "admin_snooze_initial_password"
 	// csrfCookieTTL is how long a rendered form stays submittable. It only
 	// guards against cross-site posts; it is not a second session.
 	csrfCookieTTL = 12 * time.Hour
@@ -105,6 +125,8 @@ type pageData struct {
 	// the whole risk.
 	InitialUsername string
 	InitialPassword string
+	// AssetVersion busts the asset URL when the embedded CSS or JS changes.
+	AssetVersion string
 
 	Statuses   []string
 	Status     string
@@ -147,6 +169,11 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 		showInitialCredentials:   cfg.ShowInitialCredentials,
 		preferredInitialUsername: cfg.PreferredInitialUsername,
 	}
+
+	mux.HandleFunc("GET /admin/assets/bootstrap.min.css", u.asset(bootstrapCSS, "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /admin/assets/app.css", u.asset(consoleCSS, "text/css; charset=utf-8"))
+	mux.HandleFunc("GET /admin/assets/app.js", u.asset(consoleJS, "text/javascript; charset=utf-8"))
+	mux.HandleFunc("GET /admin/assets/theme.js", u.asset(consoleThemeJS, "text/javascript; charset=utf-8"))
 
 	mux.HandleFunc("GET /admin", u.root)
 	mux.HandleFunc("GET /admin/{$}", u.root)
@@ -205,6 +232,13 @@ func (u *webUI) withSession(next func(http.ResponseWriter, *http.Request, *Princ
 			u.redirect(w, r, "/admin/login")
 			return
 		}
+		if u.snoozed(r) {
+			// The reminder was dismissed a moment ago; the account still holds
+			// its initial password, but the console respects the dismissal
+			// until the cookie expires. Authentication itself is unchanged.
+			account = account.Clone()
+			account.PasswordInitial = false
+		}
 		next(w, r, &Principal{Account: account, Session: session})
 	}
 }
@@ -227,7 +261,8 @@ func (u *webUI) loginData(w http.ResponseWriter, r *http.Request) pageData {
 	flash, errText := u.notices(r)
 	data := pageData{Title: "登录", CSRFToken: u.csrfToken(w, r), Flash: flash, Error: errText}
 
-	if u.showInitialCredentials {
+	snoozed := u.snoozed(r)
+	if u.showInitialCredentials && !snoozed {
 		username, password, ok, err := u.svc.InitialCredential(r.Context(), u.preferredInitialUsername)
 		if err != nil {
 			u.logger.WarnContext(r.Context(), "resolve initial credential", slog.Any("error", err))
@@ -246,7 +281,9 @@ func (u *webUI) loginData(w http.ResponseWriter, r *http.Request) pageData {
 		return data
 	}
 	if hasAccounts {
-		data.LoginTip = true
+		// A dismissed reminder stays dismissed for ten minutes; showing a
+		// differently worded nudge in its place would defeat the close button.
+		data.LoginTip = !snoozed
 	} else {
 		data.NoAccounts = true
 	}
@@ -532,6 +569,7 @@ func (u *webUI) auditPage(w http.ResponseWriter, r *http.Request, p *Principal) 
 // only honest answer to "the page failed to render" is a 500.
 func (u *webUI) render(w http.ResponseWriter, status int, page string, data pageData) {
 	data.HasModeration = u.moderation != nil
+	data.AssetVersion = consoleAssetVersion
 
 	tmpl, ok := uiPages[page]
 	if !ok {
@@ -556,9 +594,52 @@ func (u *webUI) render(w http.ResponseWriter, status int, page string, data page
 	// scripts. The policy says so, so a future <script src> has to be a
 	// deliberate change rather than an accident.
 	header.Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		"default-src 'none'; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.WriteHeader(status)
 	_, _ = w.Write(buf.Bytes())
+}
+
+// asset serves one embedded file with a content-addressed cache policy.
+func (u *webUI) asset(body []byte, contentType string) http.HandlerFunc {
+	etag := `"` + assetHash(body) + `"`
+	return func(w http.ResponseWriter, r *http.Request) {
+		header := w.Header()
+		header.Set("Content-Type", contentType)
+		header.Set("Cache-Control", "public, max-age=31536000, immutable")
+		header.Set("ETag", etag)
+		header.Set("X-Content-Type-Options", "nosniff")
+		if r.Header.Get("If-None-Match") == etag {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = w.Write(body)
+	}
+}
+
+// snoozed reports whether the operator dismissed the initial-password reminder
+// within its ten-minute window.
+func (u *webUI) snoozed(r *http.Request) bool {
+	cookie, err := r.Cookie(snoozeCookieName)
+	return err == nil && cookie.Value == "1"
+}
+
+// mustAsset reads an embedded file or fails at startup: a missing stylesheet is
+// a build mistake, not a page that should render unstyled.
+func mustAsset(name string) []byte {
+	body, err := webUIAssets.ReadFile(name)
+	if err != nil {
+		panic(fmt.Sprintf("admin: read embedded asset %s: %v", name, err))
+	}
+	return body
+}
+
+// assetHash is the cache key: a short digest of the exact bytes served.
+func assetHash(parts ...[]byte) string {
+	sum := sha256.New()
+	for _, part := range parts {
+		_, _ = sum.Write(part)
+	}
+	return hex.EncodeToString(sum.Sum(nil))[:12]
 }
 
 // redirect answers with 303 so a form post lands on a GET.
@@ -765,6 +846,54 @@ func validModerationStatus(s string) bool {
 	return false
 }
 
+// relativeTime renders a timestamp the way an operator reads it: "3 分钟前" for
+// something recent, an absolute date once the relative form stops being useful.
+// The exact value stays available in the element's title attribute.
+func relativeTime(t time.Time) string {
+	if t.IsZero() {
+		return "从未"
+	}
+	elapsed := time.Since(t)
+	switch {
+	case elapsed < time.Minute:
+		return "刚刚"
+	case elapsed < time.Hour:
+		return fmt.Sprintf("%d 分钟前", int(elapsed.Minutes()))
+	case elapsed < 24*time.Hour:
+		return fmt.Sprintf("%d 小时前", int(elapsed.Hours()))
+	case elapsed < 7*24*time.Hour:
+		return fmt.Sprintf("%d 天前", int(elapsed.Hours()/24))
+	default:
+		return t.Local().Format("2006-01-02")
+	}
+}
+
+// firstRune returns the first character of s, uppercased, for an avatar. Runes
+// rather than bytes so a Chinese display name does not render as a broken
+// byte pair.
+func firstRune(s string) string {
+	for _, r := range strings.TrimSpace(s) {
+		return strings.ToUpper(string(r))
+	}
+	return "?"
+}
+
+// statusBadge maps a state to a Bootstrap badge class. Using Bootstrap's
+// text-bg-* utilities keeps contrast in both colour schemes without a second
+// set of status colours to maintain.
+func statusBadge(status any) string {
+	switch fmt.Sprint(status) {
+	case "pending":
+		return "text-bg-warning"
+	case "approved", "active":
+		return "text-bg-success"
+	case "spam":
+		return "text-bg-danger"
+	default:
+		return "text-bg-secondary"
+	}
+}
+
 // statusLabel is the Chinese label for a comment or account state.
 //
 // It takes any because template data carries both plain strings (comment
@@ -795,7 +924,10 @@ func parseUIPages() map[string]*template.Template {
 	for _, name := range []string{"login", "comments", "accounts", "audit"} {
 		pages[name] = template.Must(template.New("layout").Funcs(template.FuncMap{
 			"fmtTime":     func(t time.Time) string { return t.Local().Format("2006-01-02 15:04") },
+			"relTime":     relativeTime,
+			"firstRune":   firstRune,
 			"statusLabel": statusLabel,
+			"statusBadge": statusBadge,
 			// eqStr compares a typed string (AccountStatus) with a template
 			// literal; the built-in eq refuses the mismatch.
 			"eqStr": func(value any, want string) bool { return fmt.Sprint(value) == want },

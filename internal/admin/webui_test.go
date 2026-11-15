@@ -655,7 +655,7 @@ func TestConsoleShowsInitialPasswordReminder(t *testing.T) {
 		}
 		// The reminder is a toast fixed to the top centre of the viewport, not
 		// an inline banner inside the page body.
-		if !strings.Contains(body, `class="toasts"`) {
+		if !strings.Contains(body, `class="console-toasts"`) {
 			t.Errorf("%s has no toast container", path)
 		}
 	}
@@ -823,4 +823,194 @@ func getBody(t *testing.T, url string) string {
 		t.Fatalf("read %s: %v", url, err)
 	}
 	return string(body)
+}
+
+func TestRelativeTimeAndFirstRune(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name string
+		at   time.Time
+		want string
+	}{
+		{"never", time.Time{}, "从未"},
+		{"just now", now.Add(-30 * time.Second), "刚刚"},
+		{"minutes", now.Add(-5 * time.Minute), "5 分钟前"},
+		{"hours", now.Add(-2 * time.Hour), "2 小时前"},
+		{"days", now.Add(-72 * time.Hour), "3 天前"},
+	}
+	for _, tc := range cases {
+		if got := relativeTime(tc.at); got != tc.want {
+			t.Errorf("relativeTime(%s) = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+
+	for input, want := range map[string]string{"Ada": "A", " 张 三": "张", "": "?"} {
+		if got := firstRune(input); got != want {
+			t.Errorf("firstRune(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestConsoleServesEmbeddedAssets(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+
+	cases := []struct {
+		path   string
+		ctype  string
+		marker string
+	}{
+		{"/admin/assets/bootstrap.min.css", "text/css", "Bootstrap  v5.3.9"},
+		{"/admin/assets/app.css", "text/css", "--console-primary"},
+		{"/admin/assets/app.js", "text/javascript", "admin_snooze_initial_password"},
+		{"/admin/assets/theme.js", "text/javascript", "prefers-color-scheme: dark"},
+	}
+	for _, tc := range cases {
+		resp, err := c.client.Get(c.server.URL + tc.path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", tc.path, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.path, err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s = %d, want 200", tc.path, resp.StatusCode)
+		}
+		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, tc.ctype) {
+			t.Errorf("%s Content-Type = %q, want %s", tc.path, ct, tc.ctype)
+		}
+		if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+			t.Errorf("%s Cache-Control = %q, want an immutable policy", tc.path, cc)
+		}
+		if !strings.Contains(string(body), tc.marker) {
+			t.Errorf("%s does not contain %q", tc.path, tc.marker)
+		}
+
+		etag := resp.Header.Get("ETag")
+		if etag == "" {
+			t.Fatalf("%s has no ETag", tc.path)
+		}
+		req, err := http.NewRequest(http.MethodGet, c.server.URL+tc.path, nil)
+		if err != nil {
+			t.Fatalf("build conditional request: %v", err)
+		}
+		req.Header.Set("If-None-Match", etag)
+		conditional, err := c.client.Do(req)
+		if err != nil {
+			t.Fatalf("conditional GET %s: %v", tc.path, err)
+		}
+		conditional.Body.Close()
+		if conditional.StatusCode != http.StatusNotModified {
+			t.Errorf("%s conditional = %d, want 304", tc.path, conditional.StatusCode)
+		}
+	}
+}
+
+func TestConsoleCSPUsesSelfHostedAssets(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+
+	resp, err := c.client.Get(c.server.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET login: %v", err)
+	}
+	defer resp.Body.Close()
+
+	csp := resp.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'self'") || !strings.Contains(csp, "style-src 'self'") {
+		t.Errorf("CSP = %q, want self-hosted scripts and styles", csp)
+	}
+	if strings.Contains(csp, "unsafe-inline") {
+		t.Errorf("CSP still allows inline code: %q", csp)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read login: %v", err)
+	}
+	if !strings.Contains(string(body), `/admin/assets/bootstrap.min.css?v=`) {
+		t.Error("the page does not link the vendored Bootstrap stylesheet")
+	}
+	if !strings.Contains(string(body), `/admin/assets/app.css?v=`) {
+		t.Error("the page does not link the versioned theme stylesheet")
+	}
+	if !strings.Contains(string(body), `/admin/assets/app.js?v=`) {
+		t.Error("the page does not link the versioned script")
+	}
+}
+
+func TestConsoleReminderSnoozesForTenMinutes(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	if _, body := c.get(t, "/admin/comments"); !strings.Contains(body, "仍在使用初始密码") {
+		t.Fatal("the reminder is missing before it is dismissed")
+	}
+
+	parsed, err := url.Parse(c.server.URL + "/admin/")
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	c.jar.SetCookies(parsed, []*http.Cookie{{Name: snoozeCookieName, Value: "1", Path: "/admin"}})
+	if _, body := c.get(t, "/admin/comments"); strings.Contains(body, "仍在使用初始密码") {
+		t.Error("the reminder ignored the snooze cookie")
+	}
+
+	// Clearing the cookie brings it back, which is what happens when the
+	// ten-minute window ends.
+	c.jar.SetCookies(parsed, []*http.Cookie{{Name: snoozeCookieName, Value: "", Path: "/admin", MaxAge: -1}})
+	if _, body := c.get(t, "/admin/comments"); !strings.Contains(body, "仍在使用初始密码") {
+		t.Error("the reminder did not return after the snooze was cleared")
+	}
+}
+
+func TestConsoleLoginCredentialsRespectSnooze(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnv(t)
+	if _, err := env.svc.Bootstrap(t.Context(), "owner", "Owner", testPassword); err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{ShowInitialCredentials: true})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	client := &http.Client{Jar: jar, Timeout: 5 * time.Second}
+	parsed, err := url.Parse(server.URL + "/admin/")
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+
+	body := getBody(t, server.URL+"/admin/login")
+	if !strings.Contains(body, testPassword) {
+		t.Fatal("the login page does not show the initial password")
+	}
+
+	jar.SetCookies(parsed, []*http.Cookie{{Name: snoozeCookieName, Value: "1", Path: "/admin"}})
+	resp, err := client.Get(server.URL + "/admin/login")
+	if err != nil {
+		t.Fatalf("GET login with snooze: %v", err)
+	}
+	defer resp.Body.Close()
+	dismissed, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read login: %v", err)
+	}
+	if strings.Contains(string(dismissed), testPassword) {
+		t.Error("the snoozed login page still shows the password")
+	}
+	if strings.Contains(string(dismissed), "首次登录") {
+		t.Error("a differently worded nudge replaced the dismissed reminder")
+	}
 }

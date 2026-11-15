@@ -1,59 +1,94 @@
 {{define "content"}}
-<h1>评论审核</h1>
-<div class="tabs">
-  {{range .Statuses}}<a href="/admin/comments?status={{.}}" {{if eq $.Status .}}class="on"{{end}}>{{statusLabel .}}</a>{{end}}
+<div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3">
+  <div>
+    <h1 class="h4 mb-1">评论审核</h1>
+    <p class="text-secondary small mb-0">新评论默认进入待审，通过后才对读者可见。</p>
+  </div>
+  <div class="btn-group btn-group-sm" role="group" aria-label="按状态筛选">
+    {{range .Statuses}}<a class="btn {{if eq $.Status .}}btn-primary{{else}}btn-outline-secondary{{end}}" href="/admin/comments?status={{.}}">{{statusLabel .}}</a>{{end}}
+  </div>
 </div>
-{{if .Comments}}
-<table>
-  <thead>
-    <tr><th>时间</th><th>作者</th><th>文章</th><th>内容</th><th>状态</th><th>操作</th></tr>
-  </thead>
-  <tbody>
-    {{range .Comments}}
-    <tr>
-      <td class="nowrap">{{fmtTime .CreatedAt}}</td>
-      <td>{{.AuthorName}}<br><span class="muted">{{.AuthorEmail}}</span></td>
-      <td class="mono">{{.PostSlug}}</td>
-      <td><pre class="body">{{.Body}}</pre></td>
-      <td><span class="pill {{.Status}}">{{statusLabel .Status}}</span></td>
-      <td>
-        <div class="actions">
-          {{if ne .Status "approved"}}
-          <form method="post" action="/admin/comments/{{.ID}}/status">
-            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="status" value="approved">
-            <button type="submit">通过</button>
-          </form>
-          {{end}}
-          {{if ne .Status "rejected"}}
-          <form method="post" action="/admin/comments/{{.ID}}/status">
-            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="status" value="rejected">
-            <button type="submit">拒绝</button>
-          </form>
-          {{end}}
-          {{if ne .Status "spam"}}
-          <form method="post" action="/admin/comments/{{.ID}}/status">
-            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
-            <input type="hidden" name="status" value="spam">
-            <button type="submit">垃圾</button>
-          </form>
-          {{end}}
-          <form method="post" action="/admin/comments/{{.ID}}/delete"
-                onsubmit="return confirm('删除这条评论及其全部回复？')">
-            <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
-            <button class="danger" type="submit">删除</button>
-          </form>
-        </div>
-      </td>
-    </tr>
-    {{end}}
-  </tbody>
-</table>
-{{else}}
-<p class="empty">这个状态下没有评论。</p>
-{{end}}
+
+<div class="card shadow-sm">
+  {{if .Comments}}
+  <div class="table-responsive">
+    <table class="table table-hover align-middle mb-0">
+      <thead>
+        <tr>
+          <th scope="col">作者</th>
+          <th scope="col">评论</th>
+          <th scope="col">文章</th>
+          <th scope="col">状态</th>
+          <th scope="col">时间</th>
+          <th scope="col">操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Comments}}
+        <tr>
+          <td>
+            <div class="d-flex align-items-start gap-2">
+              <span class="avatar avatar-sm" aria-hidden="true">{{firstRune .AuthorName}}</span>
+              <div class="min-w-0">
+                <div class="small fw-semibold">{{.AuthorName}}</div>
+                <div class="small text-secondary text-break">{{.AuthorEmail}}</div>
+              </div>
+            </div>
+          </td>
+          <td><pre class="comment-body">{{.Body}}</pre></td>
+          <td><code class="mono">{{.PostSlug}}</code></td>
+          <td><span class="badge rounded-pill {{statusBadge .Status}}">{{statusLabel .Status}}</span></td>
+          <td class="text-secondary small text-nowrap" title="{{fmtTime .CreatedAt}}">{{relTime .CreatedAt}}</td>
+          <td>
+            <div class="d-flex flex-wrap align-items-start gap-1">
+              {{if ne .Status "approved"}}
+              <form method="post" action="/admin/comments/{{.ID}}/status">
+                <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+                <input type="hidden" name="status" value="approved">
+                <input type="hidden" name="return" value="{{$.Status}}">
+                <button class="btn btn-sm btn-outline-success" type="submit">{{template "iconCheck"}}通过</button>
+              </form>
+              {{end}}
+              {{if ne .Status "rejected"}}
+              <form method="post" action="/admin/comments/{{.ID}}/status">
+                <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+                <input type="hidden" name="status" value="rejected">
+                <input type="hidden" name="return" value="{{$.Status}}">
+                <button class="btn btn-sm btn-outline-secondary" type="submit">{{template "iconX"}}拒绝</button>
+              </form>
+              {{end}}
+              {{if ne .Status "spam"}}
+              <form method="post" action="/admin/comments/{{.ID}}/status">
+                <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+                <input type="hidden" name="status" value="spam">
+                <input type="hidden" name="return" value="{{$.Status}}">
+                <button class="btn btn-sm btn-outline-warning" type="submit">{{template "iconAlert"}}垃圾</button>
+              </form>
+              {{end}}
+              <form method="post" action="/admin/comments/{{.ID}}/delete"
+                    data-confirm="删除这条评论及其全部回复？">
+                <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+                <button class="btn btn-sm btn-outline-danger" type="submit">{{template "iconTrash"}}删除</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {{end}}
+      </tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="card-body text-center py-5">
+    <span class="empty-icon">{{template "iconInbox"}}</span>
+    <div class="fw-semibold small">这个状态下没有评论</div>
+    <div class="text-secondary small">新评论会先出现在「待审」。</div>
+  </div>
+  {{end}}
+</div>
+
 {{if .NextCursor}}
-<p class="pager"><a href="/admin/comments?status={{.Status}}&cursor={{.NextCursor}}">下一页</a></p>
+<div class="d-flex justify-content-end mt-3">
+  <a class="btn btn-sm btn-outline-secondary" href="/admin/comments?status={{.Status}}&cursor={{.NextCursor}}">下一页</a>
+</div>
 {{end}}
 {{end}}

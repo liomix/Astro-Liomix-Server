@@ -3,133 +3,19 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}} · Liomix 控制台</title>
-<style>
-  :root {
-    --bg: #f6f7f9;
-    --panel: #ffffff;
-    --ink: #1b1f24;
-    --muted: #6b7480;
-    --line: #e3e7ec;
-    --accent: #2f6feb;
-    --danger: #c0392b;
-    --ok: #1e7a46;
-    --warn: #9a6700;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    background: var(--bg);
-    color: var(--ink);
-    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-  }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  header.top {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 16px; padding: 0 24px; height: 52px;
-    background: var(--panel); border-bottom: 1px solid var(--line);
-    position: sticky; top: 0; z-index: 2;
-  }
-  header.top nav { display: flex; gap: 4px; }
-  header.top nav a {
-    padding: 6px 12px; border-radius: 6px; color: var(--muted); font-weight: 500;
-  }
-  header.top nav a.on { background: #eef3ff; color: var(--accent); }
-  header.top nav a:hover { background: #f0f2f5; text-decoration: none; }
-  .who { display: flex; align-items: center; gap: 10px; color: var(--muted); }
-  .who form { margin: 0; }
-  main { max-width: 1080px; margin: 0 auto; padding: 24px; }
-  h1 { font-size: 20px; margin: 0 0 16px; }
-  h2 { font-size: 15px; margin: 0 0 10px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    padding: 20px; margin-bottom: 20px;
-  }
-  .login { max-width: 360px; margin: 12vh auto; }
-  .login h1 { text-align: center; }
-  label { display: block; margin-bottom: 12px; color: var(--muted); font-size: 13px; }
-  label input {
-    display: block; width: 100%; margin-top: 5px; padding: 8px 10px;
-    border: 1px solid var(--line); border-radius: 6px; font: inherit; color: var(--ink);
-    background: #fff;
-  }
-  label input:focus { outline: 2px solid #cfe0ff; border-color: var(--accent); }
-  button {
-    font: inherit; padding: 7px 14px; border-radius: 6px; cursor: pointer;
-    border: 1px solid var(--line); background: #fff; color: var(--ink);
-  }
-  button:hover { background: #f3f5f8; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  button.primary:hover { background: #255bc4; }
-  button.link { border: 0; background: none; padding: 0; color: var(--muted); }
-  button.link:hover { text-decoration: underline; background: none; }
-  button.danger { color: var(--danger); border-color: #f0cfcb; }
-
-  /* Toasts: fixed to the top centre of the viewport, above the page. They are
-     the console's only notification channel — there are no inline banners, so
-     one place answers "did that work?" on every page. */
-  .toasts {
-    position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-    z-index: 50; width: min(560px, calc(100% - 32px));
-    display: flex; flex-direction: column; gap: 8px; pointer-events: none;
-  }
-  .toast {
-    pointer-events: auto; display: flex; align-items: flex-start; gap: 12px;
-    padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px;
-    background: #fff; box-shadow: 0 10px 30px rgba(16, 24, 40, .12);
-    font-size: 13px; animation: toast-in .18s ease-out;
-  }
-  .toast.out { opacity: 0; transform: translateY(-8px); transition: opacity .18s, transform .18s; }
-  @keyframes toast-in { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: none; } }
-  .toast.warn { background: #fffaeb; border-color: #f2d08a; color: #7a4d00; }
-  .toast.info { background: #eef3ff; border-color: #cfe0ff; color: #1b3a6b; }
-  .toast.err { background: #fdecea; border-color: #f5c6c0; color: var(--danger); }
-  .toast.ok { background: #e8f5ee; border-color: #bfe3cd; color: var(--ok); }
-  .toast .grow { flex: 1 1 auto; }
-  .toast strong { display: block; margin-bottom: 2px; }
-  .toast code { background: rgba(0, 0, 0, .06); padding: 1px 5px; border-radius: 4px; }
-  .toast a.toast-action {
-    font-weight: 600; color: inherit; text-decoration: underline;
-    white-space: nowrap; padding-top: 2px;
-  }
-  .toast button.toast-close {
-    border: 0; background: none; color: inherit; opacity: .55;
-    font-size: 18px; line-height: 1; padding: 0 2px; cursor: pointer;
-  }
-  .toast button.toast-close:hover { opacity: 1; background: none; }
-
-  table { width: 100%; border-collapse: collapse; background: var(--panel); }
-  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font-size: 12px; color: var(--muted); font-weight: 600; background: #fafbfc; }
-  tr:last-child td { border-bottom: 0; }
-  .muted { color: var(--muted); font-size: 12px; }
-  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
-  pre.body {
-    margin: 0; white-space: pre-wrap; word-break: break-word;
-    font: inherit; max-width: 380px; max-height: 140px; overflow: auto;
-  }
-  .nowrap { white-space: nowrap; font-size: 12px; color: var(--muted); }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
-  .pill.pending { background: #fff4d6; color: var(--warn); }
-  .pill.approved, .pill.active { background: #e8f5ee; color: var(--ok); }
-  .pill.rejected, .pill.spam, .pill.disabled { background: #f1f2f4; color: var(--muted); }
-  .actions { display: flex; flex-wrap: wrap; gap: 6px; }
-  .actions form { margin: 0; }
-  .tabs { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
-  .tabs a { padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--muted); }
-  .tabs a.on { border-color: var(--accent); color: var(--accent); background: #eef3ff; }
-  .tabs a:hover { text-decoration: none; background: #f3f5f8; }
-  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
-  .row { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
-  .row label { margin-bottom: 0; flex: 1 1 160px; }
-  .pager { margin-top: 14px; }
-</style>
+<meta name="color-scheme" content="light dark">
+<title>{{.Title}}</title>
+<link rel="stylesheet" href="/admin/assets/bootstrap.min.css?v={{.AssetVersion}}">
+<link rel="stylesheet" href="/admin/assets/app.css?v={{.AssetVersion}}">
+<script src="/admin/assets/theme.js?v={{.AssetVersion}}"></script>
+<script src="/admin/assets/app.js?v={{.AssetVersion}}" defer></script>
 </head>
-<body>
-<div class="toasts" id="toasts" aria-live="polite">
+<body class="{{if .Account}}bg-body-tertiary{{else}}auth{{end}}">
+<a class="visually-hidden-focusable position-absolute top-0 start-0 p-2 bg-body" href="#main">跳到主要内容</a>
+<div class="console-toasts" id="toasts" aria-live="polite">
   {{if .Account}}{{if .Account.PasswordInitial}}
-  <div class="toast warn" role="status">
+  <div class="console-toast warn" role="status" data-snooze="10">
+    <span class="toast-icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>仍在使用初始密码</strong>
       账号 <span class="mono">{{.Account.Username}}</span> 的密码是创建时生成的，请改成只有你知道的密码。
@@ -139,7 +25,8 @@
   </div>
   {{end}}{{end}}
   {{if .InitialUsername}}
-  <div class="toast warn" role="status">
+  <div class="console-toast warn" role="status" data-snooze="10">
+    <span class="toast-icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>仍在使用初始密码</strong>
       账号 <code>{{.InitialUsername}}</code>，初始密码 <code>{{.InitialPassword}}</code>。<br>
@@ -149,7 +36,8 @@
   </div>
   {{end}}
   {{if .LoginTip}}
-  <div class="toast info" role="status">
+  <div class="console-toast info" role="status">
+    <span class="toast-icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>首次登录？</strong>
       管理员账号由服务器上的 <code>server admin create</code> 创建，初始密码只显示一次；登录后请立即修改。
@@ -158,7 +46,8 @@
   </div>
   {{end}}
   {{if .NoAccounts}}
-  <div class="toast warn" role="status">
+  <div class="console-toast warn" role="status">
+    <span class="toast-icon">{{template "iconAlert"}}</span>
     <div class="grow">
       <strong>还没有管理员账号</strong>
       在服务器上运行 <code>server admin create -username &lt;name&gt;</code> 创建第一个账号。
@@ -167,56 +56,59 @@
   </div>
   {{end}}
   {{if .Error}}
-  <div class="toast err" role="alert" data-timeout="10000">
+  <div class="console-toast err" role="alert" data-timeout="10000">
+    <span class="toast-icon">{{template "iconAlert"}}</span>
     <div class="grow">{{.Error}}</div>
     <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
   {{if .Flash}}
-  <div class="toast ok" role="status" data-timeout="6000">
+  <div class="console-toast ok" role="status" data-timeout="6000">
+    <span class="toast-icon">{{template "iconCheck"}}</span>
     <div class="grow">{{.Flash}}</div>
     <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}
 </div>
 {{if .Account}}
-<header class="top">
-  <nav>
-    {{if .HasModeration}}<a href="/admin/comments" {{if eq .Nav "comments"}}class="on"{{end}}>评论</a>{{end}}
-    <a href="/admin/accounts" {{if eq .Nav "accounts"}}class="on"{{end}}>账号</a>
-    <a href="/admin/audit" {{if eq .Nav "audit"}}class="on"{{end}}>审计</a>
-  </nav>
-  <div class="who">
-    <span>{{.Account.DisplayName}}</span>
-    <form method="post" action="/admin/logout">
-      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-      <button class="link" type="submit">退出</button>
-    </form>
+<nav class="navbar navbar-expand bg-body border-bottom sticky-top">
+  <div class="container-xl flex-nowrap">
+    <a class="navbar-brand d-flex align-items-center gap-2 me-3" href="/admin/comments">
+      <span class="brand-mark">{{template "iconShield"}}</span>
+      <span class="fw-semibold">管理后台</span>
+    </a>
+    <ul class="navbar-nav app-nav flex-row gap-1 me-auto">
+      {{if .HasModeration}}
+      <li class="nav-item"><a class="nav-link {{if eq .Nav "comments"}}active{{end}}" {{if eq .Nav "comments"}}aria-current="page"{{end}} href="/admin/comments">评论</a></li>
+      {{end}}
+      <li class="nav-item"><a class="nav-link {{if eq .Nav "accounts"}}active{{end}}" {{if eq .Nav "accounts"}}aria-current="page"{{end}} href="/admin/accounts">账号</a></li>
+      <li class="nav-item"><a class="nav-link {{if eq .Nav "audit"}}active{{end}}" {{if eq .Nav "audit"}}aria-current="page"{{end}} href="/admin/audit">审计</a></li>
+    </ul>
+    <div class="d-flex align-items-center gap-2">
+      <span class="avatar" aria-hidden="true">{{firstRune .Account.DisplayName}}</span>
+      <span class="small text-secondary d-none d-sm-inline">{{.Account.DisplayName}}</span>
+      <form method="post" action="/admin/logout" class="m-0">
+        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+        <button class="btn btn-sm btn-outline-secondary" type="submit" aria-label="退出登录">
+          {{template "iconLogout"}}<span class="d-none d-sm-inline">退出</span>
+        </button>
+      </form>
+    </div>
   </div>
-</header>
+</nav>
 {{end}}
-<main>
+<main id="main" {{if .Account}}class="container-xl py-4"{{end}}>
   {{template "content" .}}
 </main>
-<script>
-  // Toast behaviour: auto-dismiss the ones that opt in with data-timeout, and
-  // let every toast be closed by hand. Nothing else on the page needs script.
-  (function () {
-    var stack = document.getElementById('toasts');
-    if (!stack) return;
-    function close(toast) {
-      if (!toast) return;
-      toast.classList.add('out');
-      window.setTimeout(function () { toast.remove(); }, 180);
-    }
-    stack.addEventListener('click', function (event) {
-      var button = event.target.closest('[data-dismiss]');
-      if (button) close(button.closest('.toast'));
-    });
-    Array.prototype.forEach.call(stack.querySelectorAll('.toast[data-timeout]'), function (toast) {
-      window.setTimeout(function () { close(toast); }, Number(toast.getAttribute('data-timeout')));
-    });
-  })();
-</script>
 </body>
 </html>{{end}}
+
+{{define "iconShield"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 12.2l1.8 1.8 3.4-3.6"/></svg>{{end}}
+{{define "iconKey"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="12" r="4"/><path d="M12 12h8"/><path d="M17 12v3"/><path d="M20 12v2"/></svg>{{end}}
+{{define "iconAlert"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4l9 16H3L12 4z"/><path d="M12 10v4"/><path d="M12 17.5v.5"/></svg>{{end}}
+{{define "iconCheck"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>{{end}}
+{{define "iconX"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12"/><path d="M18 6L6 18"/></svg>{{end}}
+{{define "iconTrash"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16"/><path d="M9 7V5h6v2"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>{{end}}
+{{define "iconInbox"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M4 13h5l1.5 2h3L15 13h5"/></svg>{{end}}
+{{define "iconLogout"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h9"/></svg>{{end}}
+{{define "iconSearch"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg>{{end}}

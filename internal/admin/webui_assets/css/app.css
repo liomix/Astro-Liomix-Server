@@ -1,0 +1,285 @@
+/* Theme layer on top of Bootstrap 5.3.
+ *
+ * Bootstrap provides layout, cards, tables, forms, buttons and the light/dark
+ * variables. This file only adds the pieces it does not: a brand mark, avatars,
+ * status toasts, the comment body, and a few token overrides that keep the
+ * console's blue. Everything here reads Bootstrap's own CSS variables, so dark
+ * mode (data-bs-theme) works without a second palette.
+ */
+
+:root {
+  --console-primary: #2563eb;
+  --console-primary-hover: #1d4ed8;
+  --console-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
+}
+
+:root,
+[data-bs-theme="light"] {
+  --bs-link-color: var(--console-primary);
+  --bs-link-color-rgb: 37, 99, 235;
+  --bs-link-hover-color: var(--console-primary-hover);
+  --bs-link-hover-color-rgb: 29, 78, 216;
+}
+
+.btn-primary {
+  --bs-btn-bg: var(--console-primary);
+  --bs-btn-border-color: var(--console-primary);
+  --bs-btn-hover-bg: var(--console-primary-hover);
+  --bs-btn-hover-border-color: var(--console-primary-hover);
+  --bs-btn-active-bg: #1e40af;
+  --bs-btn-active-border-color: #1e40af;
+  --bs-btn-disabled-bg: var(--console-primary);
+  --bs-btn-disabled-border-color: var(--console-primary);
+}
+
+/* Scrollbars are invisible everywhere in the console, but scrolling still works:
+ * the content scrolls, only the track and thumb are not painted. `scrollbar-width`
+ * covers Firefox and the standard; the ::-webkit-* pseudo-elements cover
+ * Chrome/Edge/Safari, which ignore the standard property.
+ *
+ * A bar drawn by the OS is not themable and looks foreign in this layout, so
+ * every scroll container (window, table overflow, the comment body) opts out. */
+html,
+body,
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+*::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb,
+*::-webkit-scrollbar-track {
+  background: transparent;
+  border: 0;
+}
+
+/* Header */
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  flex: none;
+  border-radius: .625rem;
+  color: #fff;
+  background: linear-gradient(145deg, #3b82f6, #1d4ed8);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / .25), var(--bs-box-shadow-sm);
+}
+.brand-mark svg { width: 1.1rem; height: 1.1rem; }
+.navbar-brand { font-size: .925rem; letter-spacing: -.01em; }
+
+.app-nav .nav-link {
+  padding: .375rem .75rem;
+  border-radius: .5rem;
+  font-size: .85rem;
+  font-weight: 500;
+  color: var(--bs-secondary-color);
+}
+.app-nav .nav-link:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+.app-nav .nav-link.active { background: rgb(37 99 235 / .10); color: var(--console-primary); }
+[data-bs-theme="dark"] .app-nav .nav-link.active { background: rgb(96 165 250 / .16); color: #93c5fd; }
+
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: none;
+  border-radius: 50%;
+  background: var(--bs-secondary-bg);
+  color: var(--bs-secondary-color);
+  font-size: .72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
+.avatar-sm { width: 1.75rem; height: 1.75rem; font-size: .68rem; }
+
+/* Buttons with inline SVG icons */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: .35rem; }
+.btn svg { width: .9rem; height: .9rem; flex: none; }
+.btn-sm svg { width: .82rem; height: .82rem; }
+
+/* Keep the table's square corners inside the rounded card. */
+.card.shadow-sm { overflow: hidden; }
+
+/* Tables */
+.table thead th {
+  padding: .625rem 1rem;
+  font-size: .69rem;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--bs-secondary-color);
+  background: var(--bs-tertiary-bg);
+}
+.table > :not(caption) > * > * { padding: .75rem 1rem; }
+.table-hover > tbody > tr:hover > * { --bs-table-bg-state: var(--bs-tertiary-bg); }
+
+.comment-body {
+  margin: 0;
+  max-width: 26rem;
+  max-height: 8.5rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: .84rem;
+  line-height: 1.6;
+  color: var(--bs-body-color);
+}
+.mono { font-family: var(--console-font-mono); font-size: .78rem; letter-spacing: -.01em; }
+
+/* Empty states */
+.empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin-bottom: .5rem;
+  border-radius: .75rem;
+  background: var(--bs-secondary-bg);
+  color: var(--bs-secondary-color);
+}
+.empty-icon svg { width: 1.4rem; height: 1.4rem; }
+
+/* Toasts: fixed to the top centre, above every page. Bootstrap's own toast
+ * component needs its JS to show and hide, so this is a small static variant
+ * that shares Bootstrap's colour tokens. */
+.console-toasts {
+  position: fixed;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1080;
+  width: min(36rem, calc(100% - 2rem));
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  pointer-events: none;
+}
+.console-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: .625rem;
+  padding: .75rem .875rem;
+  border: 1px solid var(--bs-border-color);
+  border-radius: .75rem;
+  background: var(--bs-body-bg);
+  color: var(--bs-body-color);
+  box-shadow: var(--bs-box-shadow-lg);
+  font-size: .84rem;
+  animation: console-toast-in .2s ease-out;
+}
+.console-toast.out {
+  opacity: 0;
+  transform: translateY(-.375rem);
+  transition: opacity .15s ease, transform .15s ease;
+}
+@keyframes console-toast-in {
+  from { opacity: 0; transform: translateY(-.625rem) scale(.99); }
+  to { opacity: 1; transform: none; }
+}
+.console-toast .toast-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  flex: none;
+  border-radius: 50%;
+}
+.console-toast .toast-icon svg { width: .9rem; height: .9rem; }
+.console-toast.warn {
+  background: var(--bs-warning-bg-subtle);
+  border-color: var(--bs-warning-border-subtle);
+  color: var(--bs-warning-text-emphasis);
+}
+.console-toast.err {
+  background: var(--bs-danger-bg-subtle);
+  border-color: var(--bs-danger-border-subtle);
+  color: var(--bs-danger-text-emphasis);
+}
+.console-toast.ok {
+  background: var(--bs-success-bg-subtle);
+  border-color: var(--bs-success-border-subtle);
+  color: var(--bs-success-text-emphasis);
+}
+.console-toast.info {
+  background: var(--bs-info-bg-subtle);
+  border-color: var(--bs-info-border-subtle);
+  color: var(--bs-info-text-emphasis);
+}
+.console-toast .grow { flex: 1 1 auto; min-width: 0; }
+.console-toast strong { display: block; margin-bottom: .125rem; }
+.console-toast code {
+  padding: .05rem .3rem;
+  border-radius: .25rem;
+  font-family: var(--console-font-mono);
+  font-size: .78rem;
+  background: rgb(0 0 0 / .06);
+}
+[data-bs-theme="dark"] .console-toast code { background: rgb(255 255 255 / .10); }
+.console-toast .toast-action { color: inherit; font-weight: 650; text-decoration: underline; white-space: nowrap; }
+.console-toast .toast-close {
+  flex: none;
+  width: 1.5rem;
+  height: 1.5rem;
+  padding: 0;
+  border: 0;
+  border-radius: .375rem;
+  background: none;
+  color: inherit;
+  opacity: .55;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.console-toast .toast-close:hover { opacity: 1; background: rgb(0 0 0 / .06); }
+
+/* Inline password reset inside the account row */
+.inline-details summary { list-style: none; cursor: pointer; }
+.inline-details summary::-webkit-details-marker { display: none; }
+.inline-details[open] { flex-basis: 100%; }
+.inline-form {
+  display: flex;
+  gap: .375rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: .5rem;
+  padding: .5rem;
+  border-radius: .5rem;
+  background: var(--bs-tertiary-bg);
+}
+.inline-form .form-control { width: 9rem; }
+
+.filter-input { width: 16rem; }
+
+/* Login page owns the viewport, without the app's container padding. */
+.auth main { max-width: none; padding: 0; }
+.auth-shell {
+  background:
+    radial-gradient(900px 420px at 18% -10%, rgb(37 99 235 / .10), transparent 60%),
+    radial-gradient(700px 380px at 100% 0%, rgb(16 185 129 / .06), transparent 55%),
+    var(--bs-tertiary-bg);
+}
+[data-bs-theme="dark"] .auth-shell {
+  background:
+    radial-gradient(900px 420px at 18% -10%, rgb(37 99 235 / .22), transparent 60%),
+    radial-gradient(700px 380px at 100% 0%, rgb(16 185 129 / .10), transparent 55%),
+    var(--bs-tertiary-bg);
+}
+.login-card { width: min(24rem, 100%); }
+
+@media (max-width: 575.98px) {
+  .filter-input { width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

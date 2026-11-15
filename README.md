@@ -109,8 +109,10 @@ curl -X PATCH http://localhost:8080/api/v1/comments/<id>/status \
 │   │   ├── migrate.go          # 内嵌并应用本模块迁移
 │   │   ├── migrations/         # 0001_admin.sql
 │   │   ├── handler_http.go     # 路由、鉴权中间件、handler
-│   │   ├── webui.go            # /admin 服务端渲染控制台（Cookie + CSRF）
+│   │   ├── webui.go            # /admin 服务端渲染控制台（Cookie + CSRF + 静态资源）
 │   │   ├── webui_templates/    # layout 与四个页面模板（内嵌进二进制）
+│   │   ├── webui_assets/css/   # bootstrap.min.css（5.3.9）+ app.css（主题覆盖）
+│   │   ├── webui_assets/js/    # app.js（toast/贪睡/确认）+ theme.js（明暗主题）
 │   │   └── dto.go              # 请求/响应形状（不含任何密码字段）
 │   └── platform/               # 跨模块横切能力，不含业务
 │       ├── apperr/             # 全项目共享的错误类别与 ValidationError
@@ -256,7 +258,9 @@ cmd ──┬──▶ comment ──┬──┐
 
 - **与 JSON API 是两套认证**：页面用 `HttpOnly; SameSite=Strict; Path=/admin` 的 cookie，API 仍只认 `Authorization: Bearer`。这样 API 不会因为浏览器自动带 cookie 而变成 CSRF 面。
 - **CSRF 用同步令牌**：令牌放在另一个 HttpOnly cookie 里，服务端渲染进每个表单的隐藏域，POST 时常量时间比较。SameSite 是第一道防线，令牌是第二道——只靠其中任何一个都不够。
-- **所有页面 `no-store`**，并带 `CSP: default-src 'none'`（只允许内联样式/脚本）、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。控制台不加载任何外部资源，策略就是按这个写的。
+- **样式与脚本是独立资源**：`/admin/assets/bootstrap.min.css`、`app.css`、`app.js`、`theme.js`，`//go:embed` 进二进制，URL 带内容哈希、`Cache-Control: immutable`，并提供 ETag/304。页面本身不带内联 `<style>`/`<script>`/`style=`。
+- **所有页面 `no-store`**，并带 `CSP: default-src 'none'; style-src 'self'; script-src 'self'`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。删除确认从内联 `onsubmit` 移到了 `app.js`，所以不需要 `unsafe-inline`。
+- **提醒可以临时关掉**：点掉「仍在使用初始密码」后，`app.js` 写一个 `admin_snooze_initial_password` cookie（`Path=/admin; Max-Age=600; SameSite=Strict`），服务端在 10 分钟内不再渲染这条提醒（以及登录页的初始凭据提示），到期后自动恢复。
 - **表单是 POST + 303 重定向（PRG）**：刷新不会重复提交；错误用 `?err=<code>` 回到列表页，文案在服务端映射，URL 里不携带任意文本。
 - **审核动作由控制台写审计**，账号动作复用 admin service 自己的审计，操作者都取当前会话的账号。
 - 生产环境把 `ADMIN_COOKIE_SECURE=true` 打开；本地 `http://localhost` 必须保持关闭，否则浏览器不存 cookie，登录会静默失败。
@@ -265,6 +269,8 @@ cmd ──┬──▶ comment ──┬──┐
 - **开发环境的登录页会显示初始凭据**：当恰好一个账号还持有初始密码、且服务运行在开发环境时，登录页顶部直接显示「账号 admin / 初始密码 astroadmin123」。这是刻意的开发便利，登录页本身是未认证页面——**不要把开发环境的控制台暴露到公网**。
 - **生产环境什么都不显示**：`APP_ENV=production` 时不预置默认账号、不写 `initial_password` 明文、登录页只给通用提示（账号由 `server admin create` 创建，忘记密码用 `server admin passwd` 重置）。
 - **初始密码提醒**：登录后每个页面顶部都会常驻「仍在使用初始密码」，带「去修改」链接，直到账号自己改密；改密后这行提示和 `initial_password` 明文一起消失。
+- **样式基础是 Bootstrap 5.3.9**：`bootstrap.min.css` 本地引入（MIT，不打 CDN），**没有引入 Bootstrap 的 JS**。布局、卡片、表格、表单、按钮直接用 Bootstrap 类；`app.css` 只覆盖主题蓝、品牌标、头像、toast、评论正文等 Bootstrap 没有的部分。深色模式由 `theme.js` 在渲染前写 `data-bs-theme`，跟随系统。
+- **可用性**：所有交互元素有 `:focus-visible` 焦点环；按钮/输入有 hover、active、disabled 状态；表头 `scope`、当前导航 `aria-current`、跳过导航链接、toast `aria-live`；尊重 `prefers-reduced-motion`。页面不加载任何外部字体、图片或脚本，CSP 仍然是 `default-src 'none'`。
 - 已知取舍：账号页只列前 200 个（不分页）、审核队列每页 50 条带「下一页」、删除按钮用原生 `confirm()`。评论正文按纯文本转义展示，不渲染 Markdown。
 
 ## 配置
