@@ -141,3 +141,68 @@ func TestMigrateRequiresFiles(t *testing.T) {
 		t.Error("Migrate() error = nil, want a complaint about the missing directory")
 	}
 }
+
+// TestMigrateSerialisesConcurrentCallers pins the reason the runner takes an
+// advisory lock: on every deploy, several instances start at the same moment.
+//
+// Without the lock both would read an empty schema_migrations and both would
+// apply the same file — the second one dying on the first statement that is not
+// idempotent. With it, one runs and the other waits, then finds nothing to do.
+func TestMigrateSerialisesConcurrentCallers(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	const probe = "concurrent_probe"
+	if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+probe); err != nil {
+		t.Fatalf("drop probe table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE name LIKE 'concurrent_%'`); err != nil {
+		t.Fatalf("clear probe migrations: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS `+probe); err != nil {
+			t.Errorf("drop probe table: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DELETE FROM schema_migrations WHERE name LIKE 'concurrent_%'`); err != nil {
+			t.Errorf("clear probe migrations: %v", err)
+		}
+	})
+
+	// Two files, the second one intentionally not idempotent: a double apply
+	// would fail loudly instead of silently succeeding.
+	fsys := fstest.MapFS{
+		"migrations/concurrent_0001_table.sql": &fstest.MapFile{
+			Data: []byte(`CREATE TABLE concurrent_probe (id int PRIMARY KEY)`),
+		},
+		"migrations/concurrent_0002_index.sql": &fstest.MapFile{
+			Data: []byte(`ALTER TABLE concurrent_probe ADD CONSTRAINT concurrent_probe_id_positive CHECK (id > 0)`),
+		},
+	}
+
+	const callers = 3
+	errs := make(chan error, callers)
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-start
+			errs <- postgres.Migrate(ctx, db, fsys, "migrations")
+		}()
+	}
+	close(start)
+
+	for i := 0; i < callers; i++ {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent Migrate() error = %v; the lock must make one run and the rest no-ops", err)
+		}
+	}
+
+	// Exactly one row in schema_migrations per file, not one per caller.
+	var recorded int
+	if err := db.QueryRowContext(ctx,
+		`SELECT count(*) FROM schema_migrations WHERE name LIKE 'concurrent_%'`).Scan(&recorded); err != nil {
+		t.Fatalf("count recorded migrations: %v", err)
+	}
+	if recorded != 2 {
+		t.Errorf("recorded %d migrations, want 2 (one per file, regardless of callers)", recorded)
+	}
+}

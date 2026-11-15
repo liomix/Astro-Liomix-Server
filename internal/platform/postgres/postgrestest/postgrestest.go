@@ -27,12 +27,6 @@ const (
 	// not answering should fail the case quickly instead of hanging the suite.
 	connectTimeout = 15 * time.Second
 
-	// migrationLockKey is the advisory lock every Migrate call takes. The value
-	// is arbitrary; what matters is that all callers agree on it, because `go
-	// test ./...` migrates several packages at once and two sessions creating
-	// schema_migrations at the same instant can collide on the catalog.
-	migrationLockKey int64 = 4_210_587_311
-
 	// lockTimeout bounds how long a test transaction waits for a table lock
 	// before giving up. Five seconds is longer than any lock this suite asks
 	// for, short enough that a blocked case reports itself instead of hanging.
@@ -103,32 +97,17 @@ func Tx(t *testing.T, db *sql.DB) *sql.Tx {
 	return tx
 }
 
-// Migrate runs apply while holding an advisory lock, so the packages the test
-// runner starts in parallel cannot create the migration bookkeeping table at the
-// same moment.
+// Migrate runs apply against the development database.
+//
+// It no longer takes an advisory lock of its own: the runner it calls
+// (postgres.Migrate) now acquires one, and taking it twice on two different
+// sessions would deadlock against itself. That was the whole reason this helper
+// used to do it — two packages migrating at once during `go test ./...` — so the
+// guarantee moved to where the work happens.
 func Migrate(t *testing.T, db *sql.DB, apply func(context.Context, *sql.DB) error) {
 	t.Helper()
 
-	ctx := context.Background()
-	// The lock is session-scoped, so it has to be taken on one pinned
-	// connection rather than through the pool, which would hand the unlock to
-	// whichever connection happened to be free.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("pin a connection for the migration lock: %v", err)
-	}
-	defer func() { _ = conn.Close() }()
-
-	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
-		t.Fatalf("take the migration lock: %v", err)
-	}
-	defer func() {
-		if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockKey); err != nil {
-			t.Errorf("release the migration lock: %v", err)
-		}
-	}()
-
-	if err := apply(ctx, db); err != nil {
+	if err := apply(context.Background(), db); err != nil {
 		t.Fatalf("apply migrations: %v", err)
 	}
 }

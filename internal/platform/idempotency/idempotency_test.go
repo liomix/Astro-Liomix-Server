@@ -126,12 +126,26 @@ func TestPruneDropsExpiredKeys(t *testing.T) {
 	// of how the row was written.
 	store.now = func() time.Time { return time.Now().Add(48 * time.Hour) }
 
+	// The returned count is global — this runs against the development database,
+	// where a locally served blog has keys of its own. Asserting on it would make
+	// the case depend on whatever the developer did in a browser.
 	pruned, err := store.Prune(ctx, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("Prune() error = %v", err)
 	}
-	if pruned != 1 {
-		t.Errorf("pruned %d rows, want 1", pruned)
+	if pruned < 1 {
+		t.Errorf("pruned %d rows, want at least the one this case created", pruned)
+	}
+
+	// Our own row is the thing that has to be gone.
+	var remaining int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM idempotency_keys WHERE scope = $1 AND key = $2`,
+		scope, key).Scan(&remaining); err != nil {
+		t.Fatalf("count pruned row: %v", err)
+	}
+	if remaining != 0 {
+		t.Errorf("%d rows of this scope survived the prune, want 0", remaining)
 	}
 
 	// With the record gone the key is free again, which is why the retention

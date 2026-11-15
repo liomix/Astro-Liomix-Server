@@ -672,6 +672,13 @@ components:
           type: string
           minLength: 1
           maxLength: 2000
+          description: >
+            Markdown source as the author wrote it — never rendered HTML.
+            Inline emoji are shortcodes like `:huoying/hy-1:`, resolved by the
+            reader against the same configuration that draws the picker, so a
+            stored asset path cannot rot the archive. The length limit counts
+            source characters, which is why markup is not an acceptable
+            encoding: one image tag costs five times what its shortcode does.
 
     UpdateCommentStatusRequest:
       type: object

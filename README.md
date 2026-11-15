@@ -8,7 +8,7 @@ Astro Liomix 博客的 Go 后端。当前实现**评论**与**站点访问计数
 - PostgreSQL 15+；schema 由 `internal/<module>/migrations/*.sql` 在启动时迁移，不需要手工建表
 - 表驱动测试 + `go vet` + `golangci-lint`
 - OpenAPI 3.1 契约（`api/openapi.yaml`）
-- 开发规范：`docs/go-rule.md`
+- 开发规范：`docs/go-rule.md`（Go）、`docs/前后端 API 通信规范.md`（接口契约）、`docs/PostgreSQL规范.md`（库表与查询）
 
 ## 快速开始
 
@@ -146,6 +146,7 @@ cmd ──┬──▶ comment ──┐
 - **状态码分得清**：`400` 是请求本身读不出来（JSON 坏了、游标不是本服务发的），`413` 超过体积上限，`415` 不是 `application/json`，`422` 是读得出来但字段不合格 —— 422 的 `errors[]` **一次列出所有**不合格字段，`field` 直接对应请求体路径（`author.email`），前端可以逐个标红。
 - **未知字段忽略而不是报错**：客户端先上新字段、服务端后支持，这个发布顺序才不会断。
 - **列表用游标翻页**：`?limit=20&cursor=...`，响应是 `{items, nextCursor}`，`nextCursor` 为 `null` 表示到底。排序是全序 `(created_at DESC, id DESC)`，游标记的是上一页最后一行，所以翻页期间有人发评论也不会重复或漏项。
+- **正文存的是源，不是渲染结果**：`body` 是作者写的 Markdown，行内表情写成短码 `:huoying/hy-1:`，由阅读端拿同一份配置翻译成图片。存 `<img>` 会让那条评论把当时的资源地址焊死（换目录就全成破图），也会让 2000 字的额度被标记吃掉（一个标签 77 字符，一个短码 15），还会把字段变成「可信 HTML」。见 `internal/comment/migrations/0004_body_is_source.sql`。
 - **`parentId` 显式给 `null`**，不是省略字段：客户端要能区分「顶层评论」和「响应里没这个字段」。
 - **每个 GET 都写了缓存语义**：公开数据 `public, max-age=0, must-revalidate` + `ETag`（`If-None-Match` 命中回 304），写操作和带凭据的响应 `no-store`。
 - **`POST` 的幂等键**：客户端按「一次提交一个键」生成，`POST /comments` 带 `Idempotency-Key` 时，同键同体重发会回放首次响应（并带 `Idempotency-Replayed: true`），同键换内容返回 `409`。键存在 `idempotency_keys` 表里（唯一索引抢占），不是进程内 map —— 多实例下只有共享存储才算数。
@@ -179,7 +180,7 @@ cmd ──┬──▶ comment ──┐
 - 迁移按文件名单调执行，每个文件一个事务：语法错误会让整个文件回滚，数据库停在上一个版本而不是半迁移状态。
 - 每个迁移事务都带 `SET LOCAL lock_timeout = '5s'`：拿不到表锁就让进程失败退出、由外部重启重试，而不是排在一条慢查询后面把所有请求一起堵死（PostgreSQL 的锁队列是先进先出）。
 - 这个执行器在事务里跑 DDL，所以 `CREATE INDEX CONCURRENTLY` 用不了。评论表还小，普通建索引是瞬时的；真要在线给大表加索引，得手工单独执行，别写进迁移文件。
-- 同时启动两个进程不会互相破坏（`CREATE TABLE IF NOT EXISTS` + 记录用 `ON CONFLICT DO NOTHING`），但多实例部署应把迁移拆成独立的启动任务。
+- 多实例同时启动**由咨询锁串行化**（`pg_try_advisory_lock` + 有上限的等待）：每次部署都是几个实例一起起来，光靠 `CREATE TABLE IF NOT EXISTS` 挡不住「两个进程同时给同一张表加约束」——第二个会撞 `duplicate_object`，然后进程退出、被反复重启。拿不到锁时等 30 秒后报「另一个进程正在迁移」，失败比挂住好。整个迁移跑在一条**固定的连接**上，锁和工作在同一个会话里；解锁的 ctx 与调用方解耦，被取消也要把锁还回去（会话级咨询锁会跟着连接留在池里）。
 - 删除评论的级联由 `parent_id ... ON DELETE CASCADE` 完成，服务层不遍历子树；`parent_id` 上补了独立索引，否则每次级联都要全表扫一遍（PostgreSQL 只给主键和唯一约束建索引，外键列要自己加）。
 - 列表与计数共用一个复合索引 `(post_slug, status, created_at DESC, id DESC)`：过滤、排序、聚合都走它，不需要「先按 slug 取全部再排」的两段式。
 - 「没有删除凭据」在库里是 `NULL` 而不是空字符串，配一条 `CHECK (delete_token_hash ~ '^[0-9a-f]{64}$')`；领域层仍用空串表示缺席，边界上互转。
@@ -187,7 +188,24 @@ cmd ──┬──▶ comment ──┐
 - 评论数用一条 `GROUP BY` 聚合回答整批 slug，不靠 `len(List(...))`。
 - `timestamptz` 读出后统一转 UTC，接口的时间字符串不随服务器时区变化；Postgres 精度是微秒。
 - 连接串进日志前会脱敏（`postgres.Redact`），启动失败的错误里不会带密码。
+- 每个连接都带**服务端超时**：`statement_timeout=10s`、`lock_timeout=3s`、`idle_in_transaction_session_timeout=60s`，外加 `application_name=astro-liomix-server`（`pg_stat_activity` 里能认出是谁）。它们作为启动参数随连接串下发，不是连上之后 `SET` 一次——池里的连接一条都没 SET 过。连接串里已经写了的参数优先，运维想自己钉就用 DSN。
+- `created_at` / `updated_at` 有 `DEFAULT now()`。服务始终显式给值（时钟可注入才测得了时间相关的用例），默认值是给**别的写入方**用的：修复脚本、导入、`psql` 手敲。没有它，这些写入会卡在 `NOT NULL` 上，然后那个人从自己终端里抄一个时间进来——正是我们不信任的那个钟。
+- 表结构的设计理由写在库里（`COMMENT ON`），`\d+ comments` 就能回答「主键为什么是字符串」「这个索引服务哪条查询」，不用去翻文档或问人。
+- `post_views` 补了 `created_at`（原来只有 `updated_at`，「这篇文章第一次被读是什么时候」答不了）。存量行按 `updated_at` 回填——那是上界，不是真实首次时间；用 `now()` 回填等于声称所有文章都是今天第一次被读。
 - 表设计复核过 [timescale/pg-aiguide](https://github.com/timescale/pg-aiguide) 的 PostgreSQL 规范：没有满足 hypertable 条件的时间序列表（评论、访客、阅读量都是「一行一实体」，不按时间追加），所以没引入 TimescaleDB。
+- 应用与迁移**应当是两个角色**：迁移要 DDL，应用只要 DML。`configs/roles.sql` 里有幂等的建角色与授权脚本（`psql -v app_password=… -f configs/roles.sql`），需要时执行。目前开发环境仍是 `postgres` 超级用户，属于登记在案的偏离（见下）。
+
+#### 有意保留的偏离
+
+按 `docs/PostgreSQL规范.md` 核对过，下面几处**不打算改**，理由记在这里：
+
+| 规范条目 | 本项目的做法 | 理由 |
+|---|---|---|
+| 3.3 对外 id 与内部主键分开 | `comments.id` 直接用 32 位随机 hex 当主键 | 它本来就是对外 id，评论没有第二个查询键；加 `bigint` 主键 + `public_id` 要多一列、多一次转换，在这个数据量上换不来任何东西 |
+| 3.4 自然键做 `UNIQUE` 不做主键 | `site_visitors.visitor_id`、`post_views.slug` 当主键 | 这两张表的「身份」就是那个值，没有其他属性；主键就是「唯一 + 非空」的强化版 |
+| 2.2 id 用 `bigint` | `site_counters.id` 是 `smallint`，恒等于 1 | 单行哨兵，`CHECK (id = 1)` 已经钉死，宽度没有意义 |
+| 1.4 每张业务表都要 `created_at` | `site_visitors` 用 `first_seen` | 语义更准（它记的就是「第一次见到这个访客」），改名不会让任何查询更好读 |
+| 12.1 应用账号最小权限 | 开发环境仍连 `postgres` | 部署侧决策（生产用哪个角色、密码怎么管）；脚本已备好，见 `configs/roles.sql` |
 
 ## 开发
 
@@ -232,6 +250,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 - 请求体读取与解码统一走 `platform/httpkit.ReadBody` / `DecodeJSON`（18.3）：体积上限、`Content-Type` 校验、忽略未知字段、拒尾随数据，模块不再各写一份
 - 构造函数 fail fast + functional options（9.2）；时钟、随机源、日志器全部可注入（16）
 - `context` 首参贯穿阻塞操作（11）；HTTP 服务端显式超时 + 优雅停机（18.5）
+- 库表、索引、事务与迁移按 `docs/PostgreSQL规范.md`：`timestamptz` / `text` + `CHECK` / 外键列手工建索引 / 迁移一文件一事务且带 `lock_timeout`
 
 ### 规范例外
 
