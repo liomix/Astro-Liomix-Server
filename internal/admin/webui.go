@@ -53,6 +53,9 @@ const (
 	sessionCookieName = "admin_session"
 	csrfCookieName    = "admin_csrf"
 	csrfFormField     = "csrf"
+	// minOwnerKeyLength refuses a key short enough to guess: a weak key gives the
+	// owner the false comfort of thinking the badge is protected.
+	minOwnerKeyLength = 16
 	// snoozeCookieName suppresses the initial-password reminder after the
 	// operator dismisses it. It is not a credential and not HttpOnly: the page
 	// script sets it when the toast is closed.
@@ -679,7 +682,7 @@ func (u *webUI) mailPage(w http.ResponseWriter, r *http.Request, p *Principal) {
 	}
 	flash, errText := u.notices(r)
 	u.render(w, http.StatusOK, "mail", pageData{
-		Title: "邮件管理", Nav: "mail", Account: p.Account,
+		Title: "邮箱管理", Nav: "mail", Account: p.Account,
 		CSRFToken: u.csrfToken(w, r),
 		Flash:     flash, Error: errText,
 		Mail: settings,
@@ -716,12 +719,19 @@ func (u *webUI) mailSave(w http.ResponseWriter, r *http.Request, p *Principal) {
 		// Whole documents: trim the pasted edges, keep every byte inside.
 		TemplateAdmin: strings.TrimSpace(r.PostFormValue("templateAdmin")),
 		TemplateReply: strings.TrimSpace(r.PostFormValue("templateReply")),
+		OwnerKey:      strings.TrimSpace(r.PostFormValue("ownerKey")),
 	}
 	if portErr != nil {
 		// A rejected save re-renders the form with what was typed. Throwing the
 		// operator back to an empty page over a typo is how "it won't save"
 		// happens.
 		u.mailFormError(w, r, p, in, "端口要填数字，通常是 465（SSL）或 587（STARTTLS）。")
+		return
+	}
+	// A short key is worse than none: it invites the owner to believe the badge
+	// is protected when the value could be guessed.
+	if in.OwnerKey != "" && len([]rune(in.OwnerKey)) < minOwnerKeyLength {
+		u.mailFormError(w, r, p, in, "站长令牌至少 16 位，短了不如不设。")
 		return
 	}
 	if err := u.mail.SaveSettings(r.Context(), in); err != nil {
@@ -749,7 +759,7 @@ func (u *webUI) mailSave(w http.ResponseWriter, r *http.Request, p *Principal) {
 // the form.
 func (u *webUI) mailFormError(w http.ResponseWriter, r *http.Request, p *Principal, in MailSettings, message string) {
 	u.render(w, http.StatusBadRequest, "mail", pageData{
-		Title: "邮件管理", Nav: "mail", Account: p.Account,
+		Title: "邮箱管理", Nav: "mail", Account: p.Account,
 		CSRFToken: u.csrfToken(w, r),
 		Error:     message,
 		Mail:      in,
@@ -794,7 +804,7 @@ func (u *webUI) mailTest(w http.ResponseWriter, r *http.Request, p *Principal) {
 		// place that answer exists, and paraphrasing it as "发送失败" would send
 		// the operator hunting in a log file.
 		u.render(w, http.StatusBadGateway, "mail", pageData{
-			Title: "邮件管理", Nav: "mail", Account: p.Account,
+			Title: "邮箱管理", Nav: "mail", Account: p.Account,
 			CSRFToken: u.csrfToken(w, r),
 			Error:     "测试邮件没有发出去：" + shortMailError(err),
 			Mail:      settings,

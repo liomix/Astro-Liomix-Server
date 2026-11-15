@@ -679,6 +679,20 @@ select {
   color: var(--text-subtle);
 }
 
+/* A field with its own action button: the key field and the button that fills
+   it are one control, so they share a row and the input takes the leftover. */
+.field-inline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.field-inline .input {
+  flex: 1 1 auto;
+}
+.field-inline .btn {
+  flex: none;
+}
+
 /* Multi-line input: the template fields take a whole HTML document, so they are
    monospace and resizable rather than a single line pretending to be a field. */
 .textarea {

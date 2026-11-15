@@ -1,10 +1,13 @@
 package comment
 
 import (
+	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,6 +28,15 @@ const DefaultMaxBodyBytes int64 = 32 << 10
 // within one operation: the same client-generated string posted to two
 // different endpoints must not collide.
 const idempotencyScope = "comments.create"
+
+// errOwnerKeyUnset is what an owner-address comment gets when the server has no
+// key at all. It names the field so the client can prompt, and the message says
+// where to fix it for the operator reading the response.
+var errOwnerKeyUnset = &apperr.ValidationError{
+	Field:   "ownerKey",
+	Code:    apperr.FieldInvalid,
+	Message: "the site owner key is not configured on the server; set one in the console under mail settings",
+}
 
 // idempotencyKeyHeader is the request header carrying a client-generated key.
 const idempotencyKeyHeader = "Idempotency-Key"
@@ -66,6 +78,15 @@ type HTTPConfig struct {
 	// Auditor records moderation actions taken with an administrator
 	// credential. Optional: without it the routes work and keep no trail.
 	Auditor audit.Recorder
+	// OwnerEmails are the addresses that may post as the site owner. A comment
+	// from one of them is only marked as the owner's when OwnerKey also matches,
+	// so typing the address is not enough to wear the badge.
+	OwnerEmails []string
+	// OwnerKey is the secret the owner's browser stores once. It is read per
+	// request because the console can change it without a restart. Empty means
+	// the account is not protected yet: the address alone marks the comment,
+	// which is the behaviour a deployment has before it sets a key.
+	OwnerKey func(ctx context.Context) (string, error)
 }
 
 // RegisterRoutes mounts the comment endpoints on mux. The caller owns the
@@ -89,6 +110,8 @@ func RegisterRoutes(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg H
 		authorizeAdmin: cfg.AdminAuthorizer,
 		auditor:        cfg.Auditor,
 		idempotency:    cfg.Idempotency,
+		owners:         newOwnerSet(cfg.OwnerEmails),
+		ownerKey:       cfg.OwnerKey,
 	}
 
 	mux.HandleFunc("GET /api/v1/posts/{slug}/comments", h.list)
@@ -124,6 +147,10 @@ type commentHandler struct {
 	authorizeAdmin func(*http.Request) (*audit.Actor, bool)
 	auditor        audit.Recorder
 	idempotency    *idempotency.Store
+	// owners decides which comments are marked as the site owner's.
+	owners ownerSet
+	// ownerKey reads the secret; nil means "none configured".
+	ownerKey func(ctx context.Context) (string, error)
 }
 
 // adminActor resolves the administrator behind a request.
@@ -263,8 +290,48 @@ func (h *commentHandler) publish(w http.ResponseWriter, r *http.Request, req cre
 }
 
 // publishComment runs the use case and encodes the response.
+// ownerComment decides whether this submission may wear the owner badge.
+//
+// Two locks, both required once a key exists: the address has to be one of the
+// configured owner addresses, and the request has to carry the key. The address
+// alone is a field anybody can type, which is exactly why the badge cannot be
+// derived from it.
+func (h *commentHandler) ownerComment(ctx context.Context, req createCommentRequest) (bool, error) {
+	if !h.owners.has(req.Author.Email) {
+		return false, nil
+	}
+	// There is no "no key configured" fallback on purpose. Recognising the owner
+	// by address alone is the hole the key exists to close, so an unconfigured
+	// deployment refuses the address instead of trusting it — and says where the
+	// key lives, because the owner is the one who has to go and set it.
+	if h.ownerKey == nil {
+		return false, errOwnerKeyUnset
+	}
+	key, err := h.ownerKey(ctx)
+	if err != nil {
+		return false, fmt.Errorf("read owner key: %w", err)
+	}
+	if key == "" {
+		return false, errOwnerKeyUnset
+	}
+	submitted := strings.TrimSpace(req.OwnerKey)
+	if subtle.ConstantTimeCompare([]byte(submitted), []byte(key)) != 1 {
+		return false, &apperr.ValidationError{
+			Field:   "ownerKey",
+			Code:    apperr.FieldInvalid,
+			Message: "this address belongs to the site owner; the owner key is required",
+		}
+	}
+	return true, nil
+}
+
 func (h *commentHandler) publishComment(r *http.Request, slug string, req createCommentRequest) (createdResponse, error) {
 	ctx := r.Context()
+	owner, err := h.ownerComment(ctx, req)
+	if err != nil {
+		return createdResponse{}, err
+	}
+
 	c, token, err := h.svc.CreateWithCredential(ctx, CreateInput{
 		PostSlug: slug,
 		ParentID: req.ParentID,
@@ -273,7 +340,8 @@ func (h *commentHandler) publishComment(r *http.Request, slug string, req create
 			Email:   req.Author.Email,
 			Website: req.Author.Website,
 		},
-		Body: req.Body,
+		Body:          req.Body,
+		AuthorIsOwner: owner,
 		// Handed to the spam filter, never stored. A filter that cannot see
 		// where a comment came from is guessing.
 		Meta: requestMeta(r),

@@ -65,9 +65,14 @@ const minSoftCategories = 2
 const (
 	defaultThreshold   = 60
 	defaultWindow      = 10 * time.Minute
-	defaultMaxPerIP    = 5
 	defaultMaxPerEmail = 3
 	defaultMaxTracked  = 20000
+
+	// The flood gate is deliberately narrow and brutal: ten comments from one
+	// address in half a minute is not a person reading, it is a script, and no
+	// combination of soft evidence should be needed to say so.
+	defaultFloodCount  = 10
+	defaultFloodWindow = 30 * time.Second
 )
 
 // Config is the filter's tuning. The zero value is not usable — use
@@ -77,12 +82,16 @@ type Config struct {
 	// decides together with minSoftCategories, so a single heavy signal — a long
 	// word-list hit, a giant body — cannot block on its own.
 	Threshold int
-	// Window is the period the frequency rules count over.
+	// Window is the period the soft frequency rule counts over.
 	Window time.Duration
-	// MaxPerIP and MaxPerEmail are how many comments one address or one email
-	// may post within Window before the flood rules start scoring.
-	MaxPerIP    int
+	// MaxPerEmail is how many comments one email may post within Window before
+	// that starts scoring. It stays soft: a household can share an address.
 	MaxPerEmail int
+	// FloodCount and FloodWindow are the instant-kill gate: FloodCount comments
+	// from one address inside FloodWindow and the comment is spam outright.
+	// Short window on purpose — a slow trickle is what the soft rules are for.
+	FloodCount  int
+	FloodWindow time.Duration
 	// MaxTracked bounds the in-memory history. Reaching it drops the history
 	// rather than growing without limit: an attacker who floods hard enough
 	// costs the filter its accuracy, never the process its memory.
@@ -94,8 +103,9 @@ func DefaultConfig() Config {
 	return Config{
 		Threshold:   defaultThreshold,
 		Window:      defaultWindow,
-		MaxPerIP:    defaultMaxPerIP,
 		MaxPerEmail: defaultMaxPerEmail,
+		FloodCount:  defaultFloodCount,
+		FloodWindow: defaultFloodWindow,
 		MaxTracked:  defaultMaxTracked,
 	}
 }
@@ -108,8 +118,11 @@ func (c Config) Validate() error {
 	if c.Window <= 0 {
 		return &apperr.ValidationError{Field: "window", Code: apperr.FieldOutOfRange, Message: "must be positive"}
 	}
-	if c.MaxPerIP <= 0 || c.MaxPerEmail <= 0 {
-		return &apperr.ValidationError{Field: "max", Code: apperr.FieldOutOfRange, Message: "must be positive"}
+	if c.MaxPerEmail <= 0 {
+		return &apperr.ValidationError{Field: "maxPerEmail", Code: apperr.FieldOutOfRange, Message: "must be positive"}
+	}
+	if c.FloodCount <= 0 || c.FloodWindow <= 0 {
+		return &apperr.ValidationError{Field: "flood", Code: apperr.FieldOutOfRange, Message: "must be positive"}
 	}
 	if c.MaxTracked <= 0 {
 		return &apperr.ValidationError{Field: "maxTracked", Code: apperr.FieldOutOfRange, Message: "must be positive"}

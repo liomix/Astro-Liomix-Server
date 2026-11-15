@@ -47,6 +47,7 @@ func (p mailPanel) Settings(ctx context.Context) (admin.MailSettings, error) {
 		AdminNotify:   settings.AdminNotify,
 		TemplateAdmin: settings.TemplateAdmin,
 		TemplateReply: settings.TemplateReply,
+		OwnerKey:      settings.OwnerKey,
 	}, nil
 }
 
@@ -68,6 +69,7 @@ func (p mailPanel) SaveSettings(ctx context.Context, in admin.MailSettings) erro
 		AdminNotify:   in.AdminNotify,
 		TemplateAdmin: in.TemplateAdmin,
 		TemplateReply: in.TemplateReply,
+		OwnerKey:      in.OwnerKey,
 	}
 	// An empty box means "leave it alone": the page was never given the stored
 	// value, so it cannot send it back, and reading empty as "erase" would wipe

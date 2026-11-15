@@ -215,7 +215,7 @@ func TestFilterFloodPerAddress(t *testing.T) {
 
 	clock := &stepClock{at: time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)}
 	tuning := spam.DefaultConfig()
-	tuning.MaxPerIP = 2
+	tuning.FloodCount = 3
 	filter := spam.New(spam.WithConfig(tuning), spam.WithClock(clock.now))
 
 	for i := 1; i <= 2; i++ {
@@ -228,7 +228,7 @@ func TestFilterFloodPerAddress(t *testing.T) {
 		} else if verdict.Spam {
 			t.Fatalf("comment #%d under the limit was flagged: %d %v", i, verdict.Score, verdict.Reasons)
 		}
-		clock.advance(10 * time.Second)
+		clock.advance(5 * time.Second)
 	}
 
 	content := clean()
@@ -262,11 +262,12 @@ func TestConfigValidate(t *testing.T) {
 	}
 
 	cases := map[string]func(*spam.Config){
-		"zero threshold":   func(c *spam.Config) { c.Threshold = 0 },
-		"zero window":      func(c *spam.Config) { c.Window = 0 },
-		"zero per ip":      func(c *spam.Config) { c.MaxPerIP = 0 },
-		"zero per email":   func(c *spam.Config) { c.MaxPerEmail = 0 },
-		"zero max tracked": func(c *spam.Config) { c.MaxTracked = 0 },
+		"zero threshold":    func(c *spam.Config) { c.Threshold = 0 },
+		"zero window":       func(c *spam.Config) { c.Window = 0 },
+		"zero flood count":  func(c *spam.Config) { c.FloodCount = 0 },
+		"zero flood window": func(c *spam.Config) { c.FloodWindow = 0 },
+		"zero per email":    func(c *spam.Config) { c.MaxPerEmail = 0 },
+		"zero max tracked":  func(c *spam.Config) { c.MaxTracked = 0 },
 	}
 	for name, mutate := range cases {
 		cfg := valid
@@ -442,5 +443,29 @@ func TestFilterSeesThroughObfuscation(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(verdict.Reasons, " "), "词") {
 		t.Errorf("reasons = %v, want a lexicon hit", verdict.Reasons)
+	}
+}
+
+func TestFloodGateIgnoresSlowTraffic(t *testing.T) {
+	t.Parallel()
+
+	clock := &stepClock{at: time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)}
+	tuning := spam.DefaultConfig()
+	tuning.FloodCount = 3
+	filter := spam.New(spam.WithConfig(tuning), spam.WithClock(clock.now))
+
+	// One comment every 20 seconds never puts three inside a 30-second window,
+	// so a chatty reader is not executed by the flood gate.
+	for i := 1; i <= 6; i++ {
+		content := clean()
+		content.Body = strings.Repeat("慢慢聊 ", i)
+		verdict, err := filter.Check(t.Context(), content)
+		if err != nil {
+			t.Fatalf("Check() #%d error = %v", i, err)
+		}
+		if verdict.Spam {
+			t.Fatalf("comment #%d was flagged by the flood gate: %v", i, verdict.Reasons)
+		}
+		clock.advance(20 * time.Second)
 	}
 }

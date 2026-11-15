@@ -88,13 +88,15 @@ func newSpamModerator(cfg *config.Config, logger *slog.Logger) (comment.Moderato
 	tuning := spam.DefaultConfig()
 	tuning.Threshold = cfg.Spam.Threshold
 	tuning.Window = cfg.Spam.Window
-	tuning.MaxPerIP = cfg.Spam.MaxPerIP
+	tuning.FloodCount = cfg.Spam.FloodCount
+	tuning.FloodWindow = cfg.Spam.FloodWindow
 	tuning.MaxPerEmail = cfg.Spam.MaxPerEmail
 
 	logger.Info("spam filter enabled",
 		slog.Int("threshold", tuning.Threshold),
 		slog.Duration("window", tuning.Window),
-		slog.Int("max_per_ip", tuning.MaxPerIP),
+		slog.Int("flood_count", tuning.FloodCount),
+		slog.Duration("flood_window", tuning.FloodWindow),
 		slog.Int("max_per_email", tuning.MaxPerEmail))
 	options = append(options, spam.WithConfig(tuning))
 	return spamModerator{checker: spam.New(options...), logger: logger}, true

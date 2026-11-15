@@ -83,11 +83,15 @@ type Spam struct {
 	Enabled bool
 	// Threshold is the score at which a comment is stored as spam.
 	Threshold int
-	// Window, MaxPerIP and MaxPerEmail drive the volume rules: how many
-	// comments one address or one email may post before it starts scoring.
+	// Window and MaxPerEmail drive the soft volume rule: one email posting more
+	// than this inside the window starts scoring, but never decides alone.
 	Window      time.Duration
-	MaxPerIP    int
 	MaxPerEmail int
+	// FloodCount and FloodWindow are the instant kill: this many comments from
+	// one address inside this window and the comment is spam outright, whatever
+	// else it says. Ten in thirty seconds is a script, not a reader.
+	FloodCount  int
+	FloodWindow time.Duration
 	// LexiconFile is an optional alternative word list. Empty uses the one
 	// compiled into the binary; a path is read once at startup, so a typo shows
 	// up in the log rather than in a silently weaker filter.
@@ -157,6 +161,16 @@ type HTTP struct {
 type Comment struct {
 	DefaultPageSize int
 	MaxPageSize     int
+	// OwnerEmails are the addresses that post as the site owner. A comment
+	// carrying one of them is flagged in the API so clients can mark it. It is
+	// recognition, not authentication: the address is typed by the commenter
+	// like every other field, so this only works while the owner's address is
+	// private — which is exactly what moderation mail needs it to be.
+	//
+	// The default is this deployment's owner (the same person SITE_NAME already
+	// defaults to), so the badge works without any environment at all.
+	// SITE_OWNER_EMAILS replaces the list when it is set.
+	OwnerEmails []string
 }
 
 // Load reads the environment and returns a validated configuration. All
@@ -179,6 +193,7 @@ func Load() (*Config, error) {
 		Comment: Comment{
 			DefaultPageSize: 20,
 			MaxPageSize:     100,
+			OwnerEmails:     []string{"liomix2077@qq.com"},
 		},
 		Database: Database{
 			MaxOpenConns:    10,
@@ -200,8 +215,9 @@ func Load() (*Config, error) {
 			Enabled:     true,
 			Threshold:   60,
 			Window:      10 * time.Minute,
-			MaxPerIP:    5,
 			MaxPerEmail: 3,
+			FloodCount:  10,
+			FloodWindow: 30 * time.Second,
 		},
 	}
 
@@ -218,6 +234,11 @@ func Load() (*Config, error) {
 	loadStringList("HTTP_CORS_ORIGINS", &cfg.HTTP.CORSOrigins, &errs)
 	loadInt("COMMENT_DEFAULT_PAGE_SIZE", &cfg.Comment.DefaultPageSize, &errs)
 	loadInt("COMMENT_MAX_PAGE_SIZE", &cfg.Comment.MaxPageSize, &errs)
+	// Only replace the default when the variable actually names somebody:
+	// an unset (or empty) variable must not silently turn the owner badge off.
+	if ownerEmails := splitList(os.Getenv("SITE_OWNER_EMAILS")); len(ownerEmails) > 0 {
+		cfg.Comment.OwnerEmails = ownerEmails
+	}
 
 	// The URL is read directly rather than through envString so that "blank"
 	// stays distinguishable: a blank URL in development means "use the local
@@ -256,7 +277,8 @@ func Load() (*Config, error) {
 	loadBool("SPAM_ENABLED", &cfg.Spam.Enabled, &errs)
 	loadInt("SPAM_THRESHOLD", &cfg.Spam.Threshold, &errs)
 	loadDuration("SPAM_WINDOW", &cfg.Spam.Window, &errs)
-	loadInt("SPAM_MAX_PER_IP", &cfg.Spam.MaxPerIP, &errs)
+	loadInt("SPAM_FLOOD_COUNT", &cfg.Spam.FloodCount, &errs)
+	loadDuration("SPAM_FLOOD_WINDOW", &cfg.Spam.FloodWindow, &errs)
 	loadInt("SPAM_MAX_PER_EMAIL", &cfg.Spam.MaxPerEmail, &errs)
 	cfg.Spam.LexiconFile = strings.TrimSpace(os.Getenv("SPAM_LEXICON_FILE"))
 
@@ -344,7 +366,30 @@ func (c *Config) validate() error {
 	// MAIL_* is not validated here any more: it is only a first-run import into
 	// the mail_settings row, and the console validates what it saves. A stale
 	// environment must not stop the server from starting once the row exists.
+	// A mistyped owner address silently means "no owner badge", which is
+	// exactly the failure that takes an afternoon to notice.
+	for _, email := range c.Comment.OwnerEmails {
+		if !strings.Contains(email, "@") {
+			errs = append(errs, fmt.Errorf("SITE_OWNER_EMAILS: %q is not an email address", email))
+		}
+	}
 	return errors.Join(append(errs, c.Spam.validate())...)
+}
+
+// splitList reads a separated environment value into a slice. Commas,
+// semicolons and spaces all work, because the operator should not have to
+// remember which one this variable wanted.
+func splitList(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	out := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if field = strings.TrimSpace(field); field != "" {
+			out = append(out, field)
+		}
+	}
+	return out
 }
 
 func envString(key, fallback string) string {
@@ -441,8 +486,11 @@ func (s Spam) validate() error {
 	if s.Window <= 0 {
 		errs = append(errs, errors.New("SPAM_WINDOW must be positive"))
 	}
-	if s.MaxPerIP <= 0 {
-		errs = append(errs, errors.New("SPAM_MAX_PER_IP must be positive"))
+	if s.FloodCount <= 0 {
+		errs = append(errs, errors.New("SPAM_FLOOD_COUNT must be positive"))
+	}
+	if s.FloodWindow <= 0 {
+		errs = append(errs, errors.New("SPAM_FLOOD_WINDOW must be positive"))
 	}
 	if s.MaxPerEmail <= 0 {
 		errs = append(errs, errors.New("SPAM_MAX_PER_EMAIL must be positive"))

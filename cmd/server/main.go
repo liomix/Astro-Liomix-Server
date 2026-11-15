@@ -242,6 +242,16 @@ func run() error {
 				AdminAuthorizer: adminService.AuthorizeRequest,
 				Auditor:         auditStore,
 				Idempotency:     idempotencyStore,
+				OwnerEmails:     cfg.Comment.OwnerEmails,
+				// Read per request: the console can rotate the key without a
+				// restart, and a rotation must take effect on the next comment.
+				OwnerKey: func(ctx context.Context) (string, error) {
+					settings, _, err := mailStore.Load(ctx)
+					if err != nil {
+						return "", err
+					}
+					return settings.OwnerKey, nil
+				},
 			})
 			count.RegisterRoutes(mux, logger, countService, count.HTTPConfig{})
 			admin.RegisterRoutes(mux, logger, adminService, admin.HTTPConfig{

@@ -33,7 +33,7 @@ func NewPostgresRepository(db postgres.Executor) *PostgresRepository {
 
 // commentColumns is the projection every read shares, in the order
 // scanComment expects.
-const commentColumns = `id, post_slug, parent_id, author_name, author_email, author_website, body, status, delete_token_hash, created_at, updated_at`
+const commentColumns = `id, post_slug, parent_id, author_name, author_email, author_website, body, status, delete_token_hash, created_at, updated_at, author_is_owner`
 
 // rowScanner is the part of *sql.Row and *sql.Rows that scanComment needs.
 type rowScanner interface {
@@ -60,6 +60,7 @@ func scanComment(row rowScanner) (*Comment, error) {
 		&deleteTokenHash,
 		&c.CreatedAt,
 		&c.UpdatedAt,
+		&c.AuthorIsOwner,
 	); err != nil {
 		return nil, err
 	}
@@ -97,7 +98,7 @@ func (r *PostgresRepository) Create(ctx context.Context, c *Comment) error {
 
 	_, err := r.db.ExecContext(ctx, `
 		INSERT INTO comments (`+commentColumns+`)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
 		c.ID,
 		c.PostSlug,
 		parentID,
@@ -109,6 +110,7 @@ func (r *PostgresRepository) Create(ctx context.Context, c *Comment) error {
 		deleteTokenHash,
 		c.CreatedAt.UTC(),
 		c.UpdatedAt.UTC(),
+		c.AuthorIsOwner,
 	)
 	if err != nil {
 		switch {

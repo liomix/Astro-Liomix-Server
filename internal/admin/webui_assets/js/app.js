@@ -223,6 +223,29 @@
     });
   });
 
+  // "随机生成" next to the owner-token field: 32 hex characters from
+  // crypto.getRandomValues, typed into the input rather than saved, so the
+  // operator still presses 保存 with the rest of the form.
+  document.addEventListener("click", function (event) {
+    var target = event.target;
+    if (!target || !target.closest) return;
+    var button = target.closest("[data-generate-owner-key]");
+    if (!button) return;
+
+    var row = button.parentElement;
+    var input = row ? row.querySelector("input") : null;
+    if (!input) return;
+
+    var bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    var key = Array.prototype.map
+      .call(bytes, function (b) {
+        return ("0" + b.toString(16)).slice(-2);
+      })
+      .join("");
+    input.value = key;
+  });
+
   // Destructive forms ask first. Declared here rather than with an inline
   // onsubmit attribute so 'unsafe-inline' is not needed for scripts. A button
   // can carry the question too: in a bulk bar only the delete button is

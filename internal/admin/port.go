@@ -169,6 +169,9 @@ type MailSettings struct {
 	// page. Empty means the template compiled into the binary.
 	TemplateAdmin string
 	TemplateReply string
+	// OwnerKey is the secret that lets a comment from an owner address wear the
+	// owner badge.
+	OwnerKey string
 }
 
 // MailService is the mail subsystem as the console sees it: one settings row to

@@ -1,7 +1,7 @@
 {{define "content"}}
 <div class="page-head">
   <div>
-    <h1 class="page-head__title">邮件管理</h1>
+    <h1 class="page-head__title">邮箱管理</h1>
     <p class="page-head__sub">SMTP 账号、发件人与通知开关都在这里；保存后下一封信就按新设置走。</p>
   </div>
   <div class="page-head__actions">
@@ -83,6 +83,26 @@
                  value="{{range $i, $to := .Mail.AdminTo}}{{if $i}}, {{end}}{{$to}}{{end}}"
                  autocomplete="off" spellcheck="false">
           <span class="field__hint">多个地址用逗号分隔；留空则只发回复提醒。</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <header class="panel__head">
+        <div>
+          <h2 class="panel__title">站长令牌</h2>
+          <p class="panel__sub">别人拿你的邮箱评论只能算访客；带上这个令牌才是站长</p>
+        </div>
+      </header>
+      <div class="panel__body">
+        <div class="field">
+          <label class="field__label" for="mail-owner-key">令牌</label>
+          <div class="field-inline">
+            <input class="input" id="mail-owner-key" name="ownerKey" value="{{.Mail.OwnerKey}}"
+                   autocomplete="off" spellcheck="false">
+            <button class="btn btn--sm btn--outline" type="button" data-generate-owner-key>随机生成</button>
+          </div>
+          <span class="field__hint">至少 16 位；留空则只认邮箱（不防冒充）。换过令牌后，浏览器里存的旧令牌要重新输入一次。</span>
         </div>
       </div>
     </section>

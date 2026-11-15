@@ -44,7 +44,8 @@ func clearEnv(t *testing.T) {
 		"SPAM_ENABLED",
 		"SPAM_THRESHOLD",
 		"SPAM_WINDOW",
-		"SPAM_MAX_PER_IP",
+		"SPAM_FLOOD_COUNT",
+		"SPAM_FLOOD_WINDOW",
 		"SPAM_MAX_PER_EMAIL",
 		"SPAM_LEXICON_FILE",
 		"DATABASE_URL",
@@ -290,5 +291,35 @@ func TestLoadRejectsHalfConfiguredBootstrap(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ADMIN_BOOTSTRAP") {
 		t.Errorf("error = %v, want it to name the bootstrap variables", err)
+	}
+}
+
+// TestLoadOwnerEmails covers the badge the blog draws next to the owner's
+// comments. The deployment has a default address, and an unset variable must
+// not wipe it — that is how a feature ends up looking unimplemented.
+func TestLoadOwnerEmails(t *testing.T) {
+	clearEnv(t)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Comment.OwnerEmails) != 1 || cfg.Comment.OwnerEmails[0] != "liomix2077@qq.com" {
+		t.Errorf("OwnerEmails = %v, want this deployment's owner by default", cfg.Comment.OwnerEmails)
+	}
+
+	t.Setenv("SITE_OWNER_EMAILS", "owner@example.com, second@example.com")
+	cfg, err = config.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if len(cfg.Comment.OwnerEmails) != 2 || cfg.Comment.OwnerEmails[1] != "second@example.com" {
+		t.Errorf("OwnerEmails = %v, want the configured list", cfg.Comment.OwnerEmails)
+	}
+
+	// A typo would silently mean "nobody is the owner".
+	t.Setenv("SITE_OWNER_EMAILS", "not-an-address")
+	if _, err := config.Load(); err == nil {
+		t.Error("Load() accepted an owner address without an @")
 	}
 }

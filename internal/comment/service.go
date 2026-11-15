@@ -136,6 +136,10 @@ type CreateInput struct {
 	Body     string
 	// Meta is the request context a spam filter needs. It is never stored.
 	Meta RequestMeta
+	// AuthorIsOwner is decided by the transport, which is the only layer that
+	// sees the owner key. The domain does not know how the owner is recognised;
+	// it only records the result.
+	AuthorIsOwner bool
 }
 
 // Create validates and stores a new comment.
@@ -209,6 +213,8 @@ func (s *Service) prepareComment(ctx context.Context, in CreateInput) (*Comment,
 		Status:    StatusPending,
 		CreatedAt: now,
 		UpdatedAt: now,
+		// Recorded, not derived: the flag travels with the row from here on.
+		AuthorIsOwner: in.AuthorIsOwner,
 	}
 	if err := c.Validate(); err != nil {
 		return nil, fmt.Errorf("validate comment: %w", err)

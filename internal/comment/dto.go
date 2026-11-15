@@ -1,12 +1,19 @@
 package comment
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // createCommentRequest is the accepted request body for POST.
 type createCommentRequest struct {
 	ParentID string               `json:"parentId"`
 	Author   commentAuthorPayload `json:"author"`
 	Body     string               `json:"body"`
+	// OwnerKey is checked only when the author email is one of the configured
+	// owner addresses. A reader never needs it; the owner stores one in their
+	// browser once.
+	OwnerKey string `json:"ownerKey"`
 }
 
 // commentAuthorPayload is the author shape accepted on input.
@@ -25,6 +32,10 @@ type commentAuthorPayload struct {
 type publicAuthor struct {
 	Name    string `json:"name"`
 	Website string `json:"website"`
+	// IsOwner marks a comment written with one of the addresses configured as
+	// the site owner. It is always present so a client can render a badge
+	// without guessing whether the field exists.
+	IsOwner bool `json:"isOwner"`
 }
 
 // commentPayload is the wire representation of a comment.
@@ -93,6 +104,34 @@ type listCommentsResponse struct {
 	NextCursor *string          `json:"nextCursor"`
 }
 
+// ownerSet holds the addresses that post as the site owner.
+//
+// It is a set rather than a slice so the per-comment check stays a map lookup:
+// a listing maps every row through it.
+type ownerSet map[string]struct{}
+
+// newOwnerSet normalizes the configured addresses. Empty entries are dropped
+// rather than matching a comment with no email.
+func newOwnerSet(emails []string) ownerSet {
+	set := make(ownerSet, len(emails))
+	for _, email := range emails {
+		if trimmed := strings.ToLower(strings.TrimSpace(email)); trimmed != "" {
+			set[trimmed] = struct{}{}
+		}
+	}
+	return set
+}
+
+// has reports whether the address belongs to the owner. An empty set never
+// matches, which is what an unconfigured deployment gets.
+func (s ownerSet) has(email string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	_, ok := s[strings.ToLower(strings.TrimSpace(email))]
+	return ok
+}
+
 // toCommentPayload maps the entity to its wire form, dropping private fields.
 func toCommentPayload(c *Comment) commentPayload {
 	var parent *string
@@ -109,6 +148,7 @@ func toCommentPayload(c *Comment) commentPayload {
 		Author: publicAuthor{
 			Name:    c.Author.Name,
 			Website: c.Author.Website,
+			IsOwner: c.AuthorIsOwner,
 		},
 		Body:      c.Body,
 		Status:    string(c.Status),

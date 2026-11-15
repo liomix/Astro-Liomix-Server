@@ -276,20 +276,21 @@ func duplicateRule(_ Content, s stats, _ Config, _ []Group) []finding {
 	return []finding{{hard, 60, "duplicate", fmt.Sprintf("同样的正文在窗口内已出现 %d 次", s.duplicates)}}
 }
 
-// floodRule is the volume rule: one address or one email posting faster than a
-// person reads.
+// floodRule is the volume rule.
 //
-// The address rule is hard — a dozen submissions from one client in ten minutes
-// is not reading. The email rule is soft, because one address shared by a
-// household can produce a burst of legitimate replies.
+// Two speeds. One address hitting FloodCount submissions inside FloodWindow is
+// an instant kill worth the whole threshold on its own: nobody types ten
+// comments in thirty seconds. The email rule stays slow and soft, because one
+// address shared by a household can produce a burst of legitimate replies.
 func floodRule(_ Content, s stats, cfg Config, _ []Group) []finding {
-	window := cfg.Window.Round(time.Minute)
 	var out []finding
-	if s.ipCount > cfg.MaxPerIP {
-		out = append(out, finding{hard, 60, "flood", fmt.Sprintf("同一 IP 在 %s 内第 %d 条", window, s.ipCount)})
+	if s.ipCount >= cfg.FloodCount {
+		out = append(out, finding{hard, 100, "flood", fmt.Sprintf(
+			"同一 IP 在 %s 内第 %d 条", cfg.FloodWindow.Round(time.Second), s.ipCount)})
 	}
 	if s.emailCount > cfg.MaxPerEmail {
-		out = append(out, finding{soft, 45, "flood", fmt.Sprintf("同一邮箱在 %s 内第 %d 条", window, s.emailCount)})
+		out = append(out, finding{soft, 45, "flood", fmt.Sprintf(
+			"同一邮箱在 %s 内第 %d 条", cfg.Window.Round(time.Minute), s.emailCount)})
 	}
 	return out
 }

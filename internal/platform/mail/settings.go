@@ -61,6 +61,11 @@ type Settings struct {
 	// binary, which is also what a fresh install sends.
 	TemplateAdmin string
 	TemplateReply string
+
+	// OwnerKey is the secret the owner's browser keeps. The comment endpoint
+	// checks it when somebody posts with an owner address, so a commenter who
+	// only knows the address cannot wear the owner badge.
+	OwnerKey string
 }
 
 // DefaultSettings is what a fresh install starts from: a conventional
@@ -195,7 +200,7 @@ func (s *Store) Load(ctx context.Context) (Settings, bool, error) {
 	err := s.db.QueryRowContext(ctx, `
 		SELECT host, port, tls, username, password,
 			sender_mail, sender_name, admin_mail, reply_notify, admin_notify,
-			template_admin, template_reply
+			template_admin, template_reply, owner_key
 		FROM mail_settings WHERE id = 1`).Scan(
 		&out.Host,
 		&out.Port,
@@ -209,6 +214,7 @@ func (s *Store) Load(ctx context.Context) (Settings, bool, error) {
 		&out.AdminNotify,
 		&out.TemplateAdmin,
 		&out.TemplateReply,
+		&out.OwnerKey,
 	)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
@@ -229,9 +235,9 @@ func (s *Store) Save(ctx context.Context, in Settings) error {
 		INSERT INTO mail_settings (
 			id, host, port, tls, username, password,
 			sender_mail, sender_name, admin_mail, reply_notify, admin_notify,
-			template_admin, template_reply, updated_at
+			template_admin, template_reply, owner_key, updated_at
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		ON CONFLICT (id) DO UPDATE SET
 			host = EXCLUDED.host,
 			port = EXCLUDED.port,
@@ -245,6 +251,7 @@ func (s *Store) Save(ctx context.Context, in Settings) error {
 			admin_notify = EXCLUDED.admin_notify,
 			template_admin = EXCLUDED.template_admin,
 			template_reply = EXCLUDED.template_reply,
+			owner_key = EXCLUDED.owner_key,
 			updated_at = now()`,
 		strings.TrimSpace(in.Host),
 		in.Port,
@@ -258,6 +265,7 @@ func (s *Store) Save(ctx context.Context, in Settings) error {
 		in.AdminNotify,
 		in.TemplateAdmin,
 		in.TemplateReply,
+		in.OwnerKey,
 	)
 	if err != nil {
 		return fmt.Errorf("mail: save settings: %w", err)
@@ -279,9 +287,9 @@ func (s *Store) Ensure(ctx context.Context, seed Settings) (bool, error) {
 		INSERT INTO mail_settings (
 			id, host, port, tls, username, password,
 			sender_mail, sender_name, admin_mail, reply_notify, admin_notify,
-			template_admin, template_reply, updated_at
+			template_admin, template_reply, owner_key, updated_at
 		)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
 		ON CONFLICT (id) DO NOTHING`,
 		strings.TrimSpace(seed.Host),
 		seed.Port,
@@ -295,6 +303,7 @@ func (s *Store) Ensure(ctx context.Context, seed Settings) (bool, error) {
 		seed.AdminNotify,
 		seed.TemplateAdmin,
 		seed.TemplateReply,
+		seed.OwnerKey,
 	)
 	if err != nil {
 		return false, fmt.Errorf("mail: seed settings: %w", err)

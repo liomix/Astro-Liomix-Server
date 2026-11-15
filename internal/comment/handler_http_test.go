@@ -843,3 +843,126 @@ func TestModerationAcceptsAnAdminSession(t *testing.T) {
 		t.Errorf("delete events = %d, want 1", len(events))
 	}
 }
+
+// TestCommentPayloadFlagsTheOwner covers the badge the blog shows next to the
+// site owner's comments. Recognition is by address, so the comparison has to
+// ignore case and the flag has to be present on every row (false included).
+func TestCommentPayloadFlagsTheOwner(t *testing.T) {
+	t.Parallel()
+
+	svc, err := comment.NewService(newMemoryRepository(), comment.WithLogger(discardLogger()))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		comment.RegisterRoutes(mux, discardLogger(), svc, comment.HTTPConfig{
+			OwnerEmails: []string{"Owner@Example.com"},
+			OwnerKey:    func(context.Context) (string, error) { return "0123456789abcdef", nil },
+		})
+	})
+
+	owner := do(t, router, http.MethodPost, "/api/v1/posts/hello/comments",
+		`{"author":{"name":"站长","email":"owner@example.com"},"body":"这是站长自己说的话","ownerKey":"0123456789abcdef"}`)
+	if owner.Code != http.StatusCreated {
+		t.Fatalf("owner POST = %d, want 201 (body: %s)", owner.Code, owner.Body.String())
+	}
+	if !strings.Contains(owner.Body.String(), `"isOwner":true`) {
+		t.Errorf("owner comment is not flagged:/n%s", owner.Body.String())
+	}
+
+	reader := do(t, router, http.MethodPost, "/api/v1/posts/hello/comments",
+		`{"author":{"name":"读者","email":"reader@example.com"},"body":"这是读者说的话"}`)
+	if reader.Code != http.StatusCreated {
+		t.Fatalf("reader POST = %d, want 201 (body: %s)", reader.Code, reader.Body.String())
+	}
+	if !strings.Contains(reader.Body.String(), `"isOwner":false`) {
+		t.Errorf("reader comment is flagged as the owner:/n%s", reader.Body.String())
+	}
+
+}
+
+// TestOwnerKeyGuardsTheBadge covers the second lock: knowing the owner's address
+// is not enough to wear the badge, and the key never becomes a way in for
+// everybody else.
+func TestOwnerKeyGuardsTheBadge(t *testing.T) {
+	t.Parallel()
+
+	const ownerKey = "0123456789abcdef"
+	svc, err := comment.NewService(newMemoryRepository(), comment.WithLogger(discardLogger()))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		comment.RegisterRoutes(mux, discardLogger(), svc, comment.HTTPConfig{
+			OwnerEmails: []string{"owner@example.com"},
+			OwnerKey:    func(context.Context) (string, error) { return ownerKey, nil },
+		})
+	})
+
+	post := func(body string) *httptest.ResponseRecorder {
+		return do(t, router, http.MethodPost, "/api/v1/posts/hello/comments", body)
+	}
+
+	// The address alone is refused: the request never reaches the repository.
+	missing := post(`{"author":{"name":"冒充者","email":"owner@example.com"},"body":"我是站长"}`)
+	if missing.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("no key = %d, want 422 (body: %s)", missing.Code, missing.Body.String())
+	}
+	if !strings.Contains(missing.Body.String(), "ownerKey") {
+		t.Errorf("the rejection does not name the field: %s", missing.Body.String())
+	}
+
+	wrong := post(`{"author":{"name":"冒充者","email":"owner@example.com"},"body":"我是站长","ownerKey":"guess"}`)
+	if wrong.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("wrong key = %d, want 422 (body: %s)", wrong.Code, wrong.Body.String())
+	}
+
+	// The right key marks it; a different address with the same key does not.
+	owner := post(`{"author":{"name":"站长","email":"owner@example.com"},"body":"这是站长","ownerKey":"` + ownerKey + `"}`)
+	if owner.Code != http.StatusCreated {
+		t.Fatalf("right key = %d, want 201 (body: %s)", owner.Code, owner.Body.String())
+	}
+	if !strings.Contains(owner.Body.String(), `"isOwner":true`) {
+		t.Errorf("owner comment is not flagged:/n%s", owner.Body.String())
+	}
+
+	reader := post(`{"author":{"name":"读者","email":"reader@example.com"},"body":"你好","ownerKey":"` + ownerKey + `"}`)
+	if reader.Code != http.StatusCreated {
+		t.Fatalf("reader with key = %d, want 201 (body: %s)", reader.Code, reader.Body.String())
+	}
+	if !strings.Contains(reader.Body.String(), `"isOwner":false`) {
+		t.Errorf("a non-owner address was flagged:/n%s", reader.Body.String())
+	}
+}
+
+// An owner address is refused outright when the server has no key: there is no
+// "trust the email" fallback left, because that fallback is the hole.
+func TestOwnerAddressRefusedWithoutConfiguredKey(t *testing.T) {
+	t.Parallel()
+
+	svc, err := comment.NewService(newMemoryRepository(), comment.WithLogger(discardLogger()))
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		comment.RegisterRoutes(mux, discardLogger(), svc, comment.HTTPConfig{
+			OwnerEmails: []string{"owner@example.com"},
+		})
+	})
+
+	resp := do(t, router, http.MethodPost, "/api/v1/posts/hello/comments",
+		`{"author":{"name":"站长","email":"owner@example.com"},"body":"没有配置令牌"}`)
+	if resp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422", resp.Code)
+	}
+	if !strings.Contains(resp.Body.String(), "ownerKey") {
+		t.Errorf("the rejection does not name the field: %s", resp.Body.String())
+	}
+
+	// Everybody else is unaffected: the key guard only exists on owner addresses.
+	reader := do(t, router, http.MethodPost, "/api/v1/posts/hello/comments",
+		`{"author":{"name":"读者","email":"reader@example.com"},"body":"你好"}`)
+	if reader.Code != http.StatusCreated {
+		t.Fatalf("reader POST = %d, want 201 (body: %s)", reader.Code, reader.Body.String())
+	}
+}

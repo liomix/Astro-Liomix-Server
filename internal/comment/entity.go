@@ -134,6 +134,12 @@ type Comment struct {
 	// comments imported from elsewhere are in that position, and only the site
 	// owner (admin token) can remove them.
 	DeleteTokenHash string
+
+	// AuthorIsOwner records that the site owner wrote this comment, decided when
+	// it was created (owner email plus owner key) and never derived from the
+	// email afterwards — the email is a field anybody can type, so recomputing
+	// the badge from it would let anyone publish as the owner.
+	AuthorIsOwner bool
 }
 
 // Clone returns a copy of c. Comment holds only value fields, so a shallow copy

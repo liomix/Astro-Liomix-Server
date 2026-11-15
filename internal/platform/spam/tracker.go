@@ -53,11 +53,15 @@ func (t *tracker) observe(ip, email, body string) stats {
 	defer t.mu.Unlock()
 
 	now := t.now()
+	// The address counts against the flood window, everything else against the
+	// softer one: ten comments in thirty seconds has no innocent explanation, a
+	// fourth comment in ten minutes does.
+	floodCutoff := now.Add(-t.cfg.FloodWindow)
 	cutoff := now.Add(-t.cfg.Window)
 
 	var out stats
 	if ip != "" {
-		out.ipCount = t.bump(t.ips, ip, now, cutoff)
+		out.ipCount = t.bump(t.ips, ip, now, floodCutoff)
 	}
 	if email != "" {
 		out.emailCount = t.bump(t.emails, email, now, cutoff)
@@ -69,7 +73,7 @@ func (t *tracker) observe(ip, email, body string) stats {
 			out.duplicates = seen - 1
 		}
 	}
-	t.sweep(now, cutoff)
+	t.sweep(now, cutoff, floodCutoff)
 	return out
 }
 
@@ -87,12 +91,12 @@ func (t *tracker) bump(m map[string]*bucket, key string, now, cutoff time.Time) 
 
 // sweep drops keys that have gone quiet. It runs at most once a minute so a
 // burst of comments does not pay for a full map walk on every one of them.
-func (t *tracker) sweep(now, cutoff time.Time) {
+func (t *tracker) sweep(now, cutoff, floodCutoff time.Time) {
 	if now.Sub(t.swept) < time.Minute && len(t.ips)+len(t.emails)+len(t.bodies) <= t.cfg.MaxTracked {
 		return
 	}
 	t.swept = now
-	t.pruneAll(t.ips, cutoff)
+	t.pruneAll(t.ips, floodCutoff)
 	t.pruneAll(t.emails, cutoff)
 	t.pruneAll(t.bodies, cutoff)
 

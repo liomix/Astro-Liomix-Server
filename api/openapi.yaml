@@ -1104,13 +1104,19 @@ components:
 
     CommentAuthor:
       type: object
-      required: [name, website]
+      required: [name, website, isOwner]
       properties:
         name:
           type: string
         website:
           type: string
           description: Empty string when the author left none.
+        isOwner:
+          type: boolean
+          description: >-
+            True when the comment was written by the site owner: an address from
+            SITE_OWNER_EMAILS plus the owner key. Decided once at creation and
+            stored, never recomputed from the email.
 
     CreateCommentRequest:
       type: object
@@ -1135,6 +1141,14 @@ components:
             stored asset path cannot rot the archive. The length limit counts
             source characters, which is why markup is not an acceptable
             encoding: one image tag costs five times what its shortcode does.
+        ownerKey:
+          type: string
+          maxLength: 200
+          description: >
+            The site owner's key. Only consulted when `author.email` is one of
+            SITE_OWNER_EMAILS: with a key configured, a mismatched or missing
+            value is rejected with a 422 naming this field, so an address alone
+            cannot publish as the owner. Readers never send it.
 
     UpdateCommentStatusRequest:
       type: object
