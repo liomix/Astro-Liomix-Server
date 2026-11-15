@@ -16,6 +16,7 @@ import (
 	"github.com/liomix/astro-liomix-server/internal/admin"
 	"github.com/liomix/astro-liomix-server/internal/comment"
 	"github.com/liomix/astro-liomix-server/internal/count"
+	"github.com/liomix/astro-liomix-server/internal/like"
 	"github.com/liomix/astro-liomix-server/internal/platform/audit"
 	"github.com/liomix/astro-liomix-server/internal/platform/config"
 	"github.com/liomix/astro-liomix-server/internal/platform/httpkit"
@@ -168,6 +169,11 @@ func run() error {
 		return fmt.Errorf("build count service: %w", err)
 	}
 
+	likeService, err := like.NewService(like.NewPostgresRepository(db))
+	if err != nil {
+		return fmt.Errorf("build like service: %w", err)
+	}
+
 	// The audit trail is shared: the admin module writes to it and serves it,
 	// the comment module records moderation actions through the same store, so
 	// one page answers "what did this account do" across both.
@@ -254,6 +260,7 @@ func run() error {
 				},
 			})
 			count.RegisterRoutes(mux, logger, countService, count.HTTPConfig{})
+			like.RegisterRoutes(mux, logger, likeService, like.HTTPConfig{})
 			admin.RegisterRoutes(mux, logger, adminService, admin.HTTPConfig{
 				MaxBodyBytes: cfg.HTTP.MaxBodyBytes,
 			})
@@ -353,6 +360,7 @@ func openDatabase(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
 	}{
 		{"comment", comment.Migrate},
 		{"count", count.Migrate},
+		{"like", like.Migrate},
 		{"audit", audit.Migrate},
 		{"admin", admin.Migrate},
 		{"mail", mail.Migrate},

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Astro Liomix Blog API
-  version: 0.7.1
+  version: 0.8.0
   description: >
     Comment and traffic-counting API for the blog. New comments enter moderation
     and are not part of the public listing until approved.
@@ -18,6 +18,10 @@ tags:
   - name: comments
   - name: count
     description: Site-wide traffic counters.
+  - name: likes
+    description: >
+      Anonymous likes of a post. Articles and dynamics share the endpoints: a
+      dynamic is the post whose slug is `dynamic-<id>`.
   - name: health
   - name: admin
     description: >
@@ -466,6 +470,166 @@ paths:
           $ref: "#/components/responses/MalformedRequest"
         "415":
           $ref: "#/components/responses/UnsupportedMedia"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/posts/likes:
+    get:
+      tags: [likes]
+      summary: Read like counts, and the reader's own like, in bulk
+      operationId: listPostLikes
+      description: >
+        A listing page asks once for every card it renders instead of one request
+        per card. A slug nobody has liked reports zero rather than being omitted,
+        so the caller can render the placeholder without special cases.
+
+
+        `liked` answers "has *this* reader liked it", which is why the identifier
+        travels in a header instead of the query string: URLs end up in browser
+        history, referrers and gateway logs. Without the header the counts are
+        still returned and `liked` is false for everyone, which is the right
+        answer for an anonymous read.
+
+
+        The response depends on that header, so it is never stored — a shared
+        cache keyed on the URL would hand one reader's membership to the next.
+      parameters:
+        - name: slugs
+          in: query
+          required: true
+          description: Comma-separated post slugs, at most 100.
+          schema:
+            type: string
+          example: hello-astro,dynamic-2026-07-15-021127
+        - name: X-Visitor-Id
+          in: header
+          required: false
+          description: >
+            The browser's opaque identifier (8-128 characters of letters,
+            digits, `-`, `_` and `.`). Omit it to read counts only.
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._-]+$"
+      responses:
+        "200":
+          description: One entry per requested slug, in request order
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostLikesList"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+
+  /api/v1/posts/{slug}/likes/{visitorId}:
+    put:
+      tags: [likes]
+      summary: Like a post
+      operationId: likePost
+      description: >
+        Creates the membership (post, visitor). There is no request body: the
+        resource is named entirely by the URL, which is also why no idempotency
+        key is needed — repeating the request cannot create a second row.
+
+
+        The first call answers 201 with a `Location` pointing at the membership;
+        a repeat answers 200 with the same numbers, so a client that retried
+        after a timeout can tell what happened without a follow-up read.
+
+
+        A slug may contain `/` (nested articles); percent-encode it as `%2F` so
+        it stays one path segment.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+          example: hello-astro
+        - name: visitorId
+          in: path
+          required: true
+          description: >
+            The browser's opaque identifier. It authorises nothing beyond
+            removing this one like.
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._-]+$"
+          example: 5f2b1c9e-8a44-4d0e-9a71-0b6f3c2d1e88
+      responses:
+        "200":
+          description: The like already existed; the numbers are the current state
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostLike"
+        "201":
+          description: The like was created
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+            Location:
+              description: The membership this call created.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostLike"
+        "422":
+          $ref: "#/components/responses/InvalidInput"
+        "503":
+          $ref: "#/components/responses/Unavailable"
+    delete:
+      tags: [likes]
+      summary: Remove a like
+      operationId: unlikePost
+      description: >
+        Deletes the membership and answers with the resulting numbers, including
+        when there was nothing to delete. docs/前后端 API 通信规范.md 3.4 suggests
+        404 for a repeated DELETE; a like button is a toggle, so answering "you
+        never liked this" with an error would make a retried request look like a
+        failure and would withhold the count the button needs. The deviation is
+        registered in the README's exception table.
+      parameters:
+        - name: slug
+          in: path
+          required: true
+          schema:
+            type: string
+          example: hello-astro
+        - name: visitorId
+          in: path
+          required: true
+          schema:
+            type: string
+            minLength: 8
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._-]+$"
+          example: 5f2b1c9e-8a44-4d0e-9a71-0b6f3c2d1e88
+      responses:
+        "200":
+          description: The like is gone, whether or not it was there
+          headers:
+            Cache-Control:
+              $ref: "#/components/headers/NoStore"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PostLike"
         "422":
           $ref: "#/components/responses/InvalidInput"
         "503":
@@ -1299,6 +1463,33 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PostViews"
+
+    PostLike:
+      type: object
+      required: [slug, count, liked]
+      properties:
+        slug:
+          type: string
+          description: The post slug; `dynamic-<id>` for a dynamic.
+        count:
+          type: integer
+          minimum: 0
+          description: How many readers have liked the post right now.
+        liked:
+          type: boolean
+          description: >
+            Whether the reader identified by `X-Visitor-Id` (or the visitor in
+            the path) is among them. Always false in a read that carries no
+            identifier.
+
+    PostLikesList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PostLike"
 
     AdminLoginRequest:
       type: object

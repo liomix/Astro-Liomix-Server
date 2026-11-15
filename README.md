@@ -166,6 +166,9 @@ cmd ──┬──▶ comment ──┬──┐
 | `GET`  | `/api/v1/comments/{id}` | 查询单条评论（未审核的对外 404） |
 | `PATCH` | `/api/v1/comments/{id}/status` | 改审核状态，需管理员会话（或遗留 `ADMIN_TOKEN`） |
 | `DELETE` | `/api/v1/comments/{id}` | 删除评论及其所有回复：管理员凭据，或创建时拿到的作者凭据 |
+| `GET`  | `/api/v1/posts/likes?slugs=a,b` | 批量读点赞数 + 当前访客点过没有（访客身份放 `X-Visitor-Id` 头），最多 100 个 |
+| `PUT`  | `/api/v1/posts/{slug}/likes/{visitorId}` | 点赞（幂等：首次 201 带 `Location`，已赞 200），返回最新计数 |
+| `DELETE` | `/api/v1/posts/{slug}/likes/{visitorId}` | 取消点赞（幂等：没赞过也返回 200），返回最新计数 |
 | `GET`  | `/api/v1/count/site` | 站点累计访问量 / 访客数 |
 | `POST` | `/api/v1/count/site/visits` | 上报一次访问，返回最新计数 |
 | `GET`  | `/api/v1/count/posts?slugs=a,b` | 批量读取文章阅读量（列表页一次问完） |
@@ -456,6 +459,7 @@ DATABASE_URL='postgres://postgres@localhost:5432/Blog?sslmode=disable' make test
 |---|---|---|---|---|
 | 12.4 提交前跑 `-race` | 本地无法执行，依赖 CI | 本机无 gcc，`-race` 需要 cgo | 反馈延迟到流水线；PR 合并前必须等 `-race` 结果 | 换开发机时复核 |
 | 18.6 `POST` 创建返回 201 + `Location` | `POST /api/v1/count/site/visits` 返回 200 + 最新计数 | 一次访问是计数器递增，没有可寻址资源，`Location` 无处可指 | 客户端不能按 REST 惯例假定拿到资源地址；契约里写明 200 的语义 | 引入带 ID 的持久访问记录时复核 |
+| 3.4 重复 `DELETE` 用 404 | `DELETE /api/v1/posts/{slug}/likes/{visitorId}` 幂等，重复删除仍返回 200 + 最新计数 | 点赞按钮是开关，「本来就没赞」是调用方想要的状态而不是失败；返回 404 会让超时后的重试看起来像出错，且拿不到权威计数 | 客户端不能靠 404 判断「赞是否存在」；契约里写明 200 的含义 | 点赞改成可撤销的资源（带 id 与历史）时复核 |
 
 ## 待办
 

@@ -204,9 +204,11 @@ func TestWithCORSAdvertisesAuthorDelete(t *testing.T) {
 func TestWithCORSAdvertisesModerationAndIdempotency(t *testing.T) {
 	t.Parallel()
 
-	// PATCH is how the site owner moderates, and Idempotency-Key is how a
-	// create is retried safely. Advertising only what a read needs leaves both
-	// of those blocked at preflight, where the server cannot even answer.
+	// PATCH is how the site owner moderates, PUT is how a like is recorded,
+	// Idempotency-Key is how a create is retried safely, and X-Visitor-Id is how
+	// a like read identifies the reader. Advertising only what a read needs
+	// leaves all of them blocked at preflight, where the server cannot even
+	// answer.
 	next := &nextRecorder{}
 	handler := httpkit.WithCORS(httpkit.CORSConfig{AllowedOrigins: []string{"*"}}, next.handler())
 
@@ -214,17 +216,17 @@ func TestWithCORSAdvertisesModerationAndIdempotency(t *testing.T) {
 	req := httptest.NewRequest(http.MethodOptions, "/api/v1/comments/abc/status", nil)
 	req.Header.Set("Origin", "https://blog.example.com")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPatch)
-	req.Header.Set("Access-Control-Request-Headers", "authorization,idempotency-key,if-none-match")
+	req.Header.Set("Access-Control-Request-Headers", "authorization,idempotency-key,if-none-match,x-visitor-id")
 	handler.ServeHTTP(rec, req)
 
 	methods := rec.Header().Get("Access-Control-Allow-Methods")
 	headers := strings.ToLower(rec.Header().Get("Access-Control-Allow-Headers"))
-	for _, want := range []string{http.MethodPatch, http.MethodDelete, http.MethodPost} {
+	for _, want := range []string{http.MethodPatch, http.MethodDelete, http.MethodPost, http.MethodPut} {
 		if !strings.Contains(methods, want) {
 			t.Errorf("Access-Control-Allow-Methods = %q, want it to include %s", methods, want)
 		}
 	}
-	for _, want := range []string{"idempotency-key", "if-none-match"} {
+	for _, want := range []string{"idempotency-key", "if-none-match", "x-visitor-id"} {
 		if !strings.Contains(headers, want) {
 			t.Errorf("Access-Control-Allow-Headers = %q, want it to include %s", headers, want)
 		}

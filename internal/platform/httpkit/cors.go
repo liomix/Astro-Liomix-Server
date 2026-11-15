@@ -34,8 +34,11 @@ const (
 	//
 	// Every header here is one the service actually reads. Listing a header
 	// "just in case" hides the real dependency on a policy nobody reviews.
-	corsAllowMethods = "GET, POST, PATCH, DELETE, OPTIONS"
-	corsAllowHeaders = "Content-Type, Authorization, Idempotency-Key, If-None-Match"
+	corsAllowMethods = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+	// X-Visitor-Id is the browser identifier the like endpoints read; without it
+	// here the preflight succeeds for the method and the actual request is still
+	// blocked, which surfaces only as an opaque network error in the browser.
+	corsAllowHeaders = "Content-Type, Authorization, Idempotency-Key, If-None-Match, X-Visitor-Id"
 
 	// corsExposeHeaders names the response headers JavaScript is allowed to
 	// read. Custom headers are invisible to fetch() unless listed here, and the
