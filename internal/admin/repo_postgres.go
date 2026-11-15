@@ -269,6 +269,45 @@ func (r *PostgresRepository) DeleteAccount(ctx context.Context, accountID string
 	return nil
 }
 
+// Settings reads every console preference.
+func (r *PostgresRepository) Settings(ctx context.Context) (map[string]string, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT key, value FROM admin_settings`)
+	if err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
+	defer rows.Close()
+
+	values := make(map[string]string, 8)
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, fmt.Errorf("read settings: %w", err)
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read settings: %w", err)
+	}
+	return values, nil
+}
+
+// PutSettings upserts the given keys. One statement per key: the set is a
+// handful of switches, and a multi-row upsert would buy nothing but a longer
+// statement to read.
+func (r *PostgresRepository) PutSettings(ctx context.Context, values map[string]string) error {
+	for key, value := range values {
+		_, err := r.db.ExecContext(ctx, `
+			INSERT INTO admin_settings (key, value, updated_at)
+			VALUES ($1, $2, now())
+			ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+			key, value)
+		if err != nil {
+			return fmt.Errorf("write setting %q: %w", key, err)
+		}
+	}
+	return nil
+}
+
 // CountAccounts reports how many accounts exist in the given state.
 func (r *PostgresRepository) CountAccounts(ctx context.Context, status AccountStatus) (int, error) {
 	query := `SELECT count(*) FROM admin_accounts`

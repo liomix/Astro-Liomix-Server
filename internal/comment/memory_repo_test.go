@@ -3,6 +3,7 @@ package comment_test
 import (
 	"context"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -76,10 +77,19 @@ func (r *memoryRepository) List(ctx context.Context, q comment.Query) ([]*commen
 	matched := make([]*comment.Comment, 0, len(r.order))
 	for _, id := range r.order {
 		c, ok := r.byID[id]
-		if !ok || c.PostSlug != q.PostSlug {
+		if !ok {
+			continue
+		}
+		// An empty slug means every post: the moderation queue asks that way,
+		// and answering "nothing" would be a double that disagrees with the
+		// documented semantics it claims to implement.
+		if q.PostSlug != "" && c.PostSlug != q.PostSlug {
 			continue
 		}
 		if q.Status != "" && c.Status != q.Status {
+			continue
+		}
+		if q.Keyword != "" && !matchesKeyword(c, q.Keyword) {
 			continue
 		}
 		matched = append(matched, c.Clone())
@@ -142,6 +152,102 @@ func (r *memoryRepository) CountByPost(ctx context.Context, q comment.CountQuery
 	return counts, nil
 }
 
+func (r *memoryRepository) CountByStatus(ctx context.Context, q comment.Query) (map[comment.CommentStatus]int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	counts := make(map[comment.CommentStatus]int, 4)
+	for _, id := range r.order {
+		c, ok := r.byID[id]
+		if !ok {
+			continue
+		}
+		// Status is ignored on purpose: the caller is asking for the breakdown,
+		// not for a count within one state.
+		if q.PostSlug != "" && c.PostSlug != q.PostSlug {
+			continue
+		}
+		if q.Keyword != "" && !matchesKeyword(c, q.Keyword) {
+			continue
+		}
+		counts[c.Status]++
+	}
+	return counts, nil
+}
+
+// matchesKeyword mirrors the SQL adapter's ILIKE over the same four columns,
+// so the double filters like the real store.
+func matchesKeyword(c *comment.Comment, keyword string) bool {
+	needle := strings.ToLower(keyword)
+	for _, field := range []string{c.Author.Name, c.Author.Email, c.Body, c.PostSlug} {
+		if strings.Contains(strings.ToLower(field), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// UpdateStatusMany and DeleteMany mirror the SQL adapter's batch semantics: a
+// missing ID is skipped, not an error.
+func (r *memoryRepository) UpdateStatusMany(ctx context.Context, commentIDs []string, status comment.CommentStatus, at time.Time) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	affected := 0
+	for _, id := range commentIDs {
+		c, ok := r.byID[id]
+		if !ok {
+			continue
+		}
+		updated := c.Clone()
+		updated.Status = status
+		updated.UpdatedAt = at
+		r.byID[id] = updated
+		affected++
+	}
+	return affected, nil
+}
+
+func (r *memoryRepository) DeleteMany(ctx context.Context, commentIDs []string) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	affected := 0
+	for _, id := range commentIDs {
+		if _, ok := r.byID[id]; !ok {
+			continue
+		}
+		cascadeDelete(r.byID, id)
+		affected++
+	}
+	return affected, nil
+}
+
+func (r *memoryRepository) CountSince(ctx context.Context, since time.Time) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	total := 0
+	for _, c := range r.byID {
+		if !c.CreatedAt.Before(since) {
+			total++
+		}
+	}
+	return total, nil
+}
+
 func (r *memoryRepository) UpdateStatus(ctx context.Context, commentID string, status comment.CommentStatus, at time.Time) (*comment.Comment, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -170,27 +276,32 @@ func (r *memoryRepository) Delete(ctx context.Context, commentID string) error {
 	if _, ok := r.byID[commentID]; !ok {
 		return apperr.ErrNotFound
 	}
+	cascadeDelete(r.byID, commentID)
+	return nil
+}
 
+// cascadeDelete removes id and every reply beneath it. It exists as a helper so
+// Delete and DeleteMany cannot disagree about what "delete with replies" means.
+func cascadeDelete(byID map[string]*comment.Comment, id string) {
 	// Collect the subtree first: deleting while scanning would hide replies
 	// whose parent has already been removed.
-	doomed := map[string]struct{}{commentID: {}}
+	doomed := map[string]struct{}{id: {}}
 	for grew := true; grew; {
 		grew = false
-		for id, c := range r.byID {
+		for candidateID, c := range byID {
 			if c.ParentID == "" {
 				continue
 			}
-			if _, done := doomed[id]; done {
+			if _, done := doomed[candidateID]; done {
 				continue
 			}
 			if _, parentDone := doomed[c.ParentID]; parentDone {
-				doomed[id] = struct{}{}
+				doomed[candidateID] = struct{}{}
 				grew = true
 			}
 		}
 	}
-	for id := range doomed {
-		delete(r.byID, id)
+	for doomedID := range doomed {
+		delete(byID, doomedID)
 	}
-	return nil
 }

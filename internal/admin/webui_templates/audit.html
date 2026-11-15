@@ -1,8 +1,8 @@
 {{define "content"}}
-<div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3">
+<div class="page-head">
   <div>
-    <h1 class="h4 mb-1">审计日志</h1>
-    <p class="text-secondary small mb-0">登录、账号变更与评论审核都记录在此，只追加、不可修改。</p>
+    <h1 class="page-title">操作日志</h1>
+    <p class="page-sub">登录、账号变更与评论审核都记录在此，只追加、不可修改。</p>
   </div>
   <form method="get" action="/admin/audit" class="d-flex flex-wrap gap-2">
     <input class="form-control form-control-sm filter-input" name="action" value="{{.Action}}" placeholder="按动作筛选，如 auth.login" aria-label="按动作筛选">
@@ -42,7 +42,10 @@
             <span class="text-secondary small">system</span>
             {{end}}
           </td>
-          <td><code class="mono">{{.Action}}</code></td>
+          <td>
+    <div class="small">{{actionLabel .Action}}</div>
+    <div class="text-secondary small mono">{{.Action}}</div>
+  </td>
           <td>
             <code class="mono">{{.Resource}}</code>
             {{if .ResourceID}}<div class="text-secondary small text-break">{{.ResourceID}}</div>{{end}}

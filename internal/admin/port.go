@@ -31,6 +31,11 @@ type Repository interface {
 	UpdateLastLogin(ctx context.Context, accountID string, at time.Time) error
 	// DeleteAccount removes an account. Its sessions go with it.
 	DeleteAccount(ctx context.Context, accountID string) error
+	// Settings returns every stored console preference as a key/value map.
+	// Missing keys are simply absent; the caller supplies defaults.
+	Settings(ctx context.Context) (map[string]string, error)
+	// PutSettings stores the given preferences, overwriting existing keys.
+	PutSettings(ctx context.Context, values map[string]string) error
 	// CountAccounts reports how many accounts exist, optionally in one status.
 	// An empty status counts every account.
 	//
@@ -93,7 +98,10 @@ type ModerationQuery struct {
 	// Status is the moderation state to list: pending, approved, rejected or
 	// spam. The console defaults to pending.
 	Status string
-	Limit  int
+	// Keyword narrows the listing to comments whose author name, email, body
+	// or post slug contains it. Empty means no narrowing.
+	Keyword string
+	Limit   int
 	// Cursor continues after the page it names. Empty starts at the newest.
 	// It is opaque to this package: the adapter that owns the comment module
 	// encodes and decodes it.
@@ -115,8 +123,42 @@ type ModerationPage struct {
 // know about more than one of them.
 type ModerationQueue interface {
 	List(ctx context.Context, q ModerationQuery) (ModerationPage, error)
+	// Counts returns how many comments sit in each moderation state, honoring
+	// the keyword filter and ignoring the status one — it answers the question
+	// "what is in the queue", which is what the tabs display. States with no
+	// comment are present with a zero.
+	Counts(ctx context.Context, q ModerationQuery) (map[string]int, error)
+	// CountSince returns how many comments arrived at or after since, in any
+	// state. The dashboard uses it for "today".
+	CountSince(ctx context.Context, since time.Time) (int, error)
 	// SetStatus validates and stores a new moderation state.
 	SetStatus(ctx context.Context, commentID, status string) (ModerationComment, error)
+	// BulkSetStatus applies one state to a selection and reports how many rows
+	// changed. Rows deleted since the page rendered are skipped.
+	BulkSetStatus(ctx context.Context, commentIDs []string, status string) (int, error)
+	// BulkDelete removes a selection, each with its replies.
+	BulkDelete(ctx context.Context, commentIDs []string) (int, error)
 	// Delete removes a comment and every reply beneath it.
 	Delete(ctx context.Context, commentID string) error
+}
+
+// MailInfo is what the console shows about outbound mail. It is a snapshot of
+// configuration, not a place to change it: the SMTP credentials belong in the
+// environment, and a page that could edit them would be a credential editor.
+type MailInfo struct {
+	Enabled bool
+	Host    string
+	Port    int
+	TLS     string
+	From    string
+	// Admin is the address that receives new-comment notices, when configured.
+	Admin string
+}
+
+// MailService is the mail subsystem as the console sees it.
+type MailService interface {
+	Info() MailInfo
+	// SendTest queues one message, so an operator can confirm the SMTP settings
+	// without waiting for a real comment to arrive.
+	SendTest(ctx context.Context, to string) error
 }

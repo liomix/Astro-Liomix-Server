@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/liomix/astro-liomix-server/internal/admin"
 	"github.com/liomix/astro-liomix-server/internal/comment"
@@ -24,8 +25,9 @@ var _ admin.ModerationQueue = moderationQueue{}
 // List returns one page of comments in the requested moderation state.
 func (q moderationQueue) List(ctx context.Context, query admin.ModerationQuery) (admin.ModerationPage, error) {
 	listQuery := comment.Query{
-		Status: comment.CommentStatus(query.Status),
-		Limit:  query.Limit,
+		Status:  comment.CommentStatus(query.Status),
+		Keyword: query.Keyword,
+		Limit:   query.Limit,
 	}
 	if query.Cursor != "" {
 		position, err := comment.DecodeCursor(query.Cursor)
@@ -49,6 +51,29 @@ func (q moderationQueue) List(ctx context.Context, query admin.ModerationQuery) 
 	return admin.ModerationPage{Items: items, NextCursor: next}, nil
 }
 
+// Counts returns the size of every moderation state.
+func (q moderationQueue) Counts(ctx context.Context, query admin.ModerationQuery) (map[string]int, error) {
+	counts, err := q.svc.CountByStatus(ctx, comment.Query{Keyword: query.Keyword})
+	if err != nil {
+		return nil, fmt.Errorf("count comments for console: %w", err)
+	}
+
+	out := make(map[string]int, len(counts))
+	for status, count := range counts {
+		out[string(status)] = count
+	}
+	return out, nil
+}
+
+// CountSince returns how many comments arrived since the given instant.
+func (q moderationQueue) CountSince(ctx context.Context, since time.Time) (int, error) {
+	total, err := q.svc.CountSince(ctx, since)
+	if err != nil {
+		return 0, fmt.Errorf("count comments for console: %w", err)
+	}
+	return total, nil
+}
+
 // SetStatus stores a new moderation state.
 func (q moderationQueue) SetStatus(ctx context.Context, commentID, status string) (admin.ModerationComment, error) {
 	updated, err := q.svc.SetStatus(ctx, commentID, comment.CommentStatus(status))
@@ -56,6 +81,24 @@ func (q moderationQueue) SetStatus(ctx context.Context, commentID, status string
 		return admin.ModerationComment{}, fmt.Errorf("moderate comment %q: %w", commentID, err)
 	}
 	return toModerationComment(updated), nil
+}
+
+// BulkSetStatus applies one moderation state to a selection.
+func (q moderationQueue) BulkSetStatus(ctx context.Context, commentIDs []string, status string) (int, error) {
+	affected, err := q.svc.SetStatusMany(ctx, commentIDs, comment.CommentStatus(status))
+	if err != nil {
+		return 0, fmt.Errorf("moderate %d comments: %w", len(commentIDs), err)
+	}
+	return affected, nil
+}
+
+// BulkDelete removes a selection, each with its replies.
+func (q moderationQueue) BulkDelete(ctx context.Context, commentIDs []string) (int, error) {
+	affected, err := q.svc.DeleteMany(ctx, commentIDs)
+	if err != nil {
+		return 0, fmt.Errorf("delete %d comments: %w", len(commentIDs), err)
+	}
+	return affected, nil
 }
 
 // Delete removes a comment and all of its replies.

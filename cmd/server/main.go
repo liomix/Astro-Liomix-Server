@@ -100,10 +100,47 @@ func run() error {
 		logger.Info("pruned idempotency keys", slog.Int64("rows", pruned))
 	}
 
-	commentService, err := comment.NewService(commentRepo,
+	// Notifications are queued, not sent inline: approving a comment must not
+	// wait for an SMTP handshake, and a mail server that is down must not turn
+	// an approval into an error.
+	mailQueue, closeMailQueue, err := newMailQueue(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("configure mail: %w", err)
+	}
+	defer closeMailQueue()
+
+	// Filled in after the admin service is built. The comment service is
+	// constructed first, so the notifier reads through this indirection rather
+	// than capturing a service that does not exist yet.
+	var mailPrefs func(context.Context) (replyNotify, adminNotify bool)
+
+	commentOptions := []comment.Option{
 		comment.WithLogger(logger),
 		comment.WithPageSize(cfg.Comment.DefaultPageSize, cfg.Comment.MaxPageSize),
-	)
+	}
+	if moderator, ok := newSpamModerator(cfg, logger); ok {
+		commentOptions = append(commentOptions, comment.WithModerator(moderator))
+	}
+	if cfg.Mail.Enabled {
+		commentOptions = append(commentOptions, comment.WithNotifier(commentNotifier{
+			queue:   mailQueue,
+			logger:  logger,
+			site:    cfg.Mail.SiteName,
+			siteURL: cfg.Mail.SiteURL,
+			admin:   cfg.Mail.Admin,
+			prefs: func(ctx context.Context) (bool, bool) {
+				// Assigned once the admin service exists, a few lines below:
+				// the comment service is built first, and a nil reader means
+				// "both switches off", not a crash.
+				if mailPrefs == nil {
+					return false, false
+				}
+				return mailPrefs(ctx)
+			},
+		}))
+	}
+
+	commentService, err := comment.NewService(commentRepo, commentOptions...)
 	if err != nil {
 		return fmt.Errorf("build comment service: %w", err)
 	}
@@ -128,6 +165,18 @@ func run() error {
 	)
 	if err != nil {
 		return fmt.Errorf("build admin service: %w", err)
+	}
+
+	// The switches live in the database, so the console can change them without
+	// a restart. A read failure means "off": losing a notification is better
+	// than sending mail nobody asked for.
+	mailPrefs = func(ctx context.Context) (bool, bool) {
+		prefs, err := adminService.MailPreferences(ctx)
+		if err != nil {
+			logger.Warn("read mail preferences", slog.Any("error", err))
+			return false, false
+		}
+		return prefs.ReplyNotify, prefs.AdminNotify
 	}
 
 	if pruned, err := adminService.PruneExpiredSessions(startupCtx); err != nil {
@@ -190,6 +239,7 @@ func run() error {
 				SecureCookies:            cfg.Admin.CookieSecure,
 				ShowInitialCredentials:   cfg.Env == config.EnvDevelopment,
 				PreferredInitialUsername: developmentAdminUsername,
+				Mail:                     mailPanel{cfg: cfg, queue: mailQueue, logger: logger},
 			})
 		},
 	)

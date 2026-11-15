@@ -1,12 +1,12 @@
 package comment
 
 import (
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -230,7 +230,7 @@ func (h *commentHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	created, err := h.publishComment(r.Context(), r.PathValue("slug"), req)
+	created, err := h.publishComment(r, r.PathValue("slug"), req)
 	if err != nil {
 		// Releasing the claim is what makes the key usable again: the write
 		// produced nothing, so a corrected retry should be allowed to run
@@ -254,7 +254,7 @@ func (h *commentHandler) create(w http.ResponseWriter, r *http.Request) {
 
 // publish creates the comment and writes the response.
 func (h *commentHandler) publish(w http.ResponseWriter, r *http.Request, req createCommentRequest) {
-	created, err := h.publishComment(r.Context(), r.PathValue("slug"), req)
+	created, err := h.publishComment(r, r.PathValue("slug"), req)
 	if err != nil {
 		httpkit.WriteError(w, r, h.logger, err)
 		return
@@ -263,7 +263,8 @@ func (h *commentHandler) publish(w http.ResponseWriter, r *http.Request, req cre
 }
 
 // publishComment runs the use case and encodes the response.
-func (h *commentHandler) publishComment(ctx context.Context, slug string, req createCommentRequest) (createdResponse, error) {
+func (h *commentHandler) publishComment(r *http.Request, slug string, req createCommentRequest) (createdResponse, error) {
+	ctx := r.Context()
 	c, token, err := h.svc.CreateWithCredential(ctx, CreateInput{
 		PostSlug: slug,
 		ParentID: req.ParentID,
@@ -273,6 +274,9 @@ func (h *commentHandler) publishComment(ctx context.Context, slug string, req cr
 			Website: req.Author.Website,
 		},
 		Body: req.Body,
+		// Handed to the spam filter, never stored. A filter that cannot see
+		// where a comment came from is guessing.
+		Meta: requestMeta(r),
 	})
 	if err != nil {
 		return createdResponse{}, err
@@ -551,4 +555,32 @@ func queryInt(r *http.Request, name string, fallback int) (int, error) {
 		return 0, &apperr.ValidationError{Field: name, Code: apperr.FieldOutOfRange, Message: "must not be negative"}
 	}
 	return value, nil
+}
+
+// requestMeta is the request context a spam filter needs.
+//
+// RemoteAddr is used as-is: proxy headers are not trusted anywhere else in this
+// service, and trusting them only here would let a commenter choose the address
+// the filter evaluates. A deployment behind a proxy should filter there or add
+// a trusted-proxy setting, not bend this rule.
+func requestMeta(r *http.Request) RequestMeta {
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	return RequestMeta{
+		IP:        truncateRunes(ip, 64),
+		UserAgent: truncateRunes(r.UserAgent(), 300),
+		Referer:   truncateRunes(r.Referer(), 300),
+	}
+}
+
+// truncateRunes cuts to at most max characters without splitting a multi-byte
+// character, which a text column would reject outright.
+func truncateRunes(value string, max int) string {
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	return string(runes[:max])
 }

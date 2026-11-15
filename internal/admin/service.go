@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +46,7 @@ const (
 // alert rule or a saved query all match on these strings.
 const (
 	actionLogin          = "auth.login"
+	actionSettingsUpdate = "settings.mail"
 	actionLogout         = "auth.logout"
 	actionAccountCreate  = "account.create"
 	actionAccountUpdate  = "account.update"
@@ -622,6 +624,51 @@ func (s *Service) DeleteAccount(ctx context.Context, accountID string, actor aud
 		return fmt.Errorf("delete account %q: %w", accountID, err)
 	}
 	s.record(ctx, actor, actionAccountDelete, "account", account.ID, map[string]any{"username": account.Username})
+	return nil
+}
+
+// MailPreferences are the notification switches the console owns. They live in
+// the database rather than in the environment because "stop emailing me" is a
+// decision made while looking at the page, and a restart is not an answer.
+//
+// Both default to off: a fresh deployment sends no notification mail until
+// somebody turns it on, which is the safe direction to fail in.
+type MailPreferences struct {
+	ReplyNotify bool
+	AdminNotify bool
+}
+
+// Settings keys. Dotted and stable, like the audit actions.
+const (
+	settingMailReplyNotify = "mail.reply_notify"
+	settingMailAdminNotify = "mail.admin_notify"
+)
+
+// MailPreferences reads the notification switches.
+func (s *Service) MailPreferences(ctx context.Context) (MailPreferences, error) {
+	values, err := s.repo.Settings(ctx)
+	if err != nil {
+		return MailPreferences{}, fmt.Errorf("read mail preferences: %w", err)
+	}
+	return MailPreferences{
+		ReplyNotify: values[settingMailReplyNotify] == "true",
+		AdminNotify: values[settingMailAdminNotify] == "true",
+	}, nil
+}
+
+// SetMailPreferences stores the notification switches.
+func (s *Service) SetMailPreferences(ctx context.Context, prefs MailPreferences, actor audit.Actor) error {
+	values := map[string]string{
+		settingMailReplyNotify: strconv.FormatBool(prefs.ReplyNotify),
+		settingMailAdminNotify: strconv.FormatBool(prefs.AdminNotify),
+	}
+	if err := s.repo.PutSettings(ctx, values); err != nil {
+		return fmt.Errorf("write mail preferences: %w", err)
+	}
+	s.record(ctx, actor, actionSettingsUpdate, "settings", "mail", map[string]any{
+		"replyNotify": prefs.ReplyNotify,
+		"adminNotify": prefs.AdminNotify,
+	})
 	return nil
 }
 

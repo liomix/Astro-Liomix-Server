@@ -94,6 +94,93 @@ func (f *fakeRepository) CountByPost(_ context.Context, q comment.CountQuery) (m
 	return counts, nil
 }
 
+func (f *fakeRepository) CountByStatus(_ context.Context, q comment.Query) (map[comment.CommentStatus]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.countErr != nil {
+		return nil, f.countErr
+	}
+	counts := make(map[comment.CommentStatus]int, 4)
+	for _, commentID := range f.order {
+		c := f.stored[commentID]
+		counts[c.Status]++
+	}
+	return counts, nil
+}
+
+func (f *fakeRepository) CountSince(_ context.Context, since time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	total := 0
+	for _, c := range f.stored {
+		if !c.CreatedAt.Before(since) {
+			total++
+		}
+	}
+	return total, nil
+}
+
+func (f *fakeRepository) UpdateStatusMany(_ context.Context, commentIDs []string, status comment.CommentStatus, at time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.updateErr != nil {
+		return 0, f.updateErr
+	}
+	affected := 0
+	for _, id := range commentIDs {
+		c, ok := f.stored[id]
+		if !ok {
+			continue
+		}
+		updated := c.Clone()
+		updated.Status = status
+		updated.UpdatedAt = at
+		f.stored[id] = updated
+		affected++
+	}
+	return affected, nil
+}
+
+func (f *fakeRepository) DeleteMany(_ context.Context, commentIDs []string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteErr != nil {
+		return 0, f.deleteErr
+	}
+	affected := 0
+	for _, id := range commentIDs {
+		if _, ok := f.stored[id]; !ok {
+			continue
+		}
+		f.deleteSubtree(id)
+		affected++
+	}
+	return affected, nil
+}
+
+// deleteSubtree mirrors the SQL foreign key: the replies go with the parent.
+func (f *fakeRepository) deleteSubtree(id string) {
+	doomed := map[string]struct{}{id: {}}
+	for grew := true; grew; {
+		grew = false
+		for candidateID, c := range f.stored {
+			if c.ParentID == "" {
+				continue
+			}
+			if _, done := doomed[candidateID]; done {
+				continue
+			}
+			if _, parentDone := doomed[c.ParentID]; parentDone {
+				doomed[candidateID] = struct{}{}
+				grew = true
+			}
+		}
+	}
+	for doomedID := range doomed {
+		delete(f.stored, doomedID)
+	}
+}
+
 func (f *fakeRepository) UpdateStatus(_ context.Context, commentID string, status comment.CommentStatus, at time.Time) (*comment.Comment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -252,7 +339,7 @@ func TestServiceCreateUsesModerator(t *testing.T) {
 // autoApprover stands in for a spam filter that approves everything.
 type autoApprover struct{}
 
-func (autoApprover) Review(context.Context, *comment.Comment) (comment.CommentStatus, error) {
+func (autoApprover) Review(context.Context, *comment.Comment, comment.RequestMeta) (comment.CommentStatus, error) {
 	return comment.StatusApproved, nil
 }
 
@@ -504,6 +591,18 @@ func (r *capturingRepository) CountByPost(_ context.Context, q comment.CountQuer
 	}
 	return nil, nil
 }
+
+func (r *capturingRepository) CountByStatus(context.Context, comment.Query) (map[comment.CommentStatus]int, error) {
+	return nil, nil
+}
+
+func (r *capturingRepository) UpdateStatusMany(context.Context, []string, comment.CommentStatus, time.Time) (int, error) {
+	return 0, nil
+}
+
+func (r *capturingRepository) DeleteMany(context.Context, []string) (int, error) { return 0, nil }
+
+func (r *capturingRepository) CountSince(context.Context, time.Time) (int, error) { return 0, nil }
 
 func (r *capturingRepository) UpdateStatus(context.Context, string, comment.CommentStatus, time.Time) (*comment.Comment, error) {
 	return nil, apperr.ErrNotFound
@@ -894,5 +993,155 @@ func TestDeleteOwnedWrapsRepositoryError(t *testing.T) {
 
 	if err := svc.DeleteOwned(context.Background(), "missing", token); !errors.Is(err, apperr.ErrNotFound) {
 		t.Errorf("DeleteOwned(missing) error = %v, want apperr.ErrNotFound", err)
+	}
+}
+
+// recordingNotifier keeps the notifications the service produced.
+type recordingNotifier struct {
+	mu      sync.Mutex
+	notices []comment.Notification
+	err     error
+}
+
+func (n *recordingNotifier) Notify(_ context.Context, notification comment.Notification) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.err != nil {
+		return n.err
+	}
+	n.notices = append(n.notices, notification)
+	return nil
+}
+
+func (n *recordingNotifier) count() int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return len(n.notices)
+}
+
+func TestServiceBulkApproveNotifiesRepliesOnly(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repo := newFakeRepository()
+	notifier := &recordingNotifier{}
+	svc := newService(t, repo, comment.WithNotifier(notifier))
+
+	parent, err := svc.Create(ctx, validInput())
+	if err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+	replyInput := validInput()
+	replyInput.ParentID = parent.ID
+	replyInput.Author.Email = "grace@example.com"
+	replyInput.Author.Name = "Grace"
+	reply, err := svc.Create(ctx, replyInput)
+	if err != nil {
+		t.Fatalf("Create(reply) error = %v", err)
+	}
+
+	affected, err := svc.SetStatusMany(ctx, []string{parent.ID, reply.ID, "missing"}, comment.StatusApproved)
+	if err != nil {
+		t.Fatalf("SetStatusMany() error = %v", err)
+	}
+	if affected != 2 {
+		t.Errorf("affected = %d, want the two stored comments", affected)
+	}
+	if got := notifier.count(); got != 2 {
+		t.Fatalf("notifications = %d, want one per approved comment", got)
+	}
+	// The reply notification must carry the parent, because that is who gets
+	// the email.
+	var replyNotice *comment.Notification
+	for i := range notifier.notices {
+		if notifier.notices[i].Comment.ID == reply.ID {
+			replyNotice = &notifier.notices[i]
+		}
+	}
+	if replyNotice == nil {
+		t.Fatal("no notification for the reply")
+	}
+	if replyNotice.Parent == nil || replyNotice.Parent.ID != parent.ID {
+		t.Errorf("notification parent = %+v, want the parent comment", replyNotice.Parent)
+	}
+}
+
+func TestServiceBulkApproveDoesNotRepeatNotifications(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repo := newFakeRepository()
+	notifier := &recordingNotifier{}
+	svc := newService(t, repo, comment.WithNotifier(notifier))
+
+	created, err := svc.Create(ctx, validInput())
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	if _, err := svc.SetStatusMany(ctx, []string{created.ID}, comment.StatusApproved); err != nil {
+		t.Fatalf("first approve error = %v", err)
+	}
+	if _, err := svc.SetStatusMany(ctx, []string{created.ID}, comment.StatusApproved); err != nil {
+		t.Fatalf("second approve error = %v", err)
+	}
+	// The second call re-approves an already approved comment, which must not
+	// send the author another email.
+	if got := notifier.count(); got != 1 {
+		t.Errorf("notifications = %d, want 1", got)
+	}
+}
+
+func TestServiceBulkRejectsEmptyAndOversizedSelections(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	svc := newService(t, newFakeRepository())
+
+	if _, err := svc.SetStatusMany(ctx, []string{"  ", ""}, comment.StatusApproved); err == nil {
+		t.Error("SetStatusMany() accepted an empty selection")
+	}
+	if _, err := svc.SetStatusMany(ctx, []string{"a"}, comment.CommentStatus("nope")); err == nil {
+		t.Error("SetStatusMany() accepted an unknown status")
+	}
+	if _, err := svc.DeleteMany(ctx, nil); err == nil {
+		t.Error("DeleteMany() accepted an empty selection")
+	}
+
+	tooMany := make([]string, comment.MaxBulkIDs+1)
+	for i := range tooMany {
+		tooMany[i] = fmt.Sprintf("comment-%d", i)
+	}
+	if _, err := svc.DeleteMany(ctx, tooMany); err == nil {
+		t.Error("DeleteMany() accepted more than the batch cap")
+	}
+}
+
+func TestServiceDeleteManyCascades(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	repo := newFakeRepository()
+	svc := newService(t, repo)
+
+	parent, err := svc.Create(ctx, validInput())
+	if err != nil {
+		t.Fatalf("Create(parent) error = %v", err)
+	}
+	replyInput := validInput()
+	replyInput.ParentID = parent.ID
+	reply, err := svc.Create(ctx, replyInput)
+	if err != nil {
+		t.Fatalf("Create(reply) error = %v", err)
+	}
+
+	affected, err := svc.DeleteMany(ctx, []string{parent.ID, "missing"})
+	if err != nil {
+		t.Fatalf("DeleteMany() error = %v", err)
+	}
+	if affected != 1 {
+		t.Errorf("affected = %d, want 1", affected)
+	}
+	if _, err := repo.Get(ctx, reply.ID); err == nil {
+		t.Error("the reply survived its parent's deletion")
 	}
 }

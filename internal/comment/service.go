@@ -18,10 +18,16 @@ const (
 	defaultMaxPage  = 100
 )
 
+// MaxBulkIDs caps one batch operation. It matches one console page: an operator
+// selects what they can see, and a larger batch would be a script driven
+// through a UI.
+const MaxBulkIDs = 100
+
 // Service holds the comment use cases.
 type Service struct {
 	repo        Repository
 	moderator   Moderator
+	notifier    Notifier
 	ids         id.Generator
 	now         func() time.Time
 	logger      *slog.Logger
@@ -56,6 +62,15 @@ func WithClock(now func() time.Time) Option {
 		if now != nil {
 			s.now = now
 		}
+	}
+}
+
+// WithNotifier installs the notification sink. Without one, approved comments
+// simply do not notify anyone — the right default for tests and for a
+// deployment that has no mail server.
+func WithNotifier(n Notifier) Option {
+	return func(s *Service) {
+		s.notifier = n
 	}
 }
 
@@ -119,6 +134,8 @@ type CreateInput struct {
 	ParentID string
 	Author   CommentAuthor
 	Body     string
+	// Meta is the request context a spam filter needs. It is never stored.
+	Meta RequestMeta
 }
 
 // Create validates and stores a new comment.
@@ -171,6 +188,7 @@ func (s *Service) persist(ctx context.Context, c *Comment) (*Comment, error) {
 		slog.String("post_slug", c.PostSlug),
 		slog.String("status", string(c.Status)),
 	)
+	s.notifyApproved(ctx, c)
 	return c.Clone(), nil
 }
 
@@ -201,7 +219,7 @@ func (s *Service) prepareComment(ctx context.Context, in CreateInput) (*Comment,
 		}
 	}
 
-	status, err := s.moderator.Review(ctx, c)
+	status, err := s.moderator.Review(ctx, c, in.Meta)
 	if err != nil {
 		return nil, fmt.Errorf("review comment: %w", err)
 	}
@@ -285,6 +303,42 @@ func (s *Service) CountByPost(ctx context.Context, slugs []string) ([]PostCount,
 	return out, nil
 }
 
+// CountByStatus reports how many comments sit in each moderation state.
+//
+// Every known state is present in the answer, zero included, so a console can
+// render four tabs without deciding what a missing key means. The status field
+// of q is ignored by design: asking "how many, by state" is one question, not
+// four.
+func (s *Service) CountByStatus(ctx context.Context, q Query) (map[CommentStatus]int, error) {
+	q.Status = ""
+	q.Keyword = strings.TrimSpace(q.Keyword)
+	q.Limit = 0
+	q.Cursor = nil
+	if err := q.Validate(); err != nil {
+		return nil, fmt.Errorf("validate query: %w", err)
+	}
+
+	counts, err := s.repo.CountByStatus(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("count comments by status: %w", err)
+	}
+
+	out := make(map[CommentStatus]int, 4)
+	for _, status := range []CommentStatus{StatusPending, StatusApproved, StatusRejected, StatusSpam} {
+		out[status] = counts[status]
+	}
+	return out, nil
+}
+
+// CountSince reports how many comments arrived at or after since.
+func (s *Service) CountSince(ctx context.Context, since time.Time) (int, error) {
+	total, err := s.repo.CountSince(ctx, since)
+	if err != nil {
+		return 0, fmt.Errorf("count comments: %w", err)
+	}
+	return total, nil
+}
+
 // cleanSlugs trims, validates, deduplicates and caps a slug batch, preserving
 // the caller's order. Duplicates are dropped rather than rejected: a client
 // assembling the list from page content can easily name the same post twice,
@@ -332,6 +386,17 @@ func (s *Service) SetStatus(ctx context.Context, commentID string, status Commen
 		return nil, &apperr.ValidationError{Field: "status", Message: "must be one of pending, approved, rejected, spam"}
 	}
 
+	// The previous state decides whether this is a new approval: re-approving
+	// an already approved comment must not send its author another email. A
+	// failed read is not fatal — the update below is the operation that
+	// matters, and it reports its own errors.
+	previous, err := s.repo.Get(ctx, commentID)
+	if err != nil {
+		s.logger.DebugContext(ctx, "read comment before status change",
+			slog.String("comment_id", commentID), slog.Any("error", err))
+		previous = nil
+	}
+
 	updated, err := s.repo.UpdateStatus(ctx, commentID, status, s.timestamp())
 	if err != nil {
 		return nil, fmt.Errorf("update comment %q: %w", commentID, err)
@@ -341,7 +406,128 @@ func (s *Service) SetStatus(ctx context.Context, commentID string, status Commen
 		slog.String("post_slug", updated.PostSlug),
 		slog.String("status", string(updated.Status)),
 	)
+	if previous == nil || previous.Status != StatusApproved {
+		s.notifyApproved(ctx, updated)
+	}
 	return updated, nil
+}
+
+// SetStatusMany applies one moderation decision to a batch.
+//
+// Notifications are sent only for comments that became approved, and a failure
+// to notify never fails the batch: the rows are already stored.
+func (s *Service) SetStatusMany(ctx context.Context, commentIDs []string, status CommentStatus) (int, error) {
+	if !status.Valid() {
+		return 0, &apperr.ValidationError{Field: "status", Message: "must be one of " + statusList}
+	}
+	ids, err := cleanIDs(commentIDs)
+	if err != nil {
+		return 0, err
+	}
+
+	// The previous state decides who gets mail: re-approving a comment that was
+	// already visible must not send its author another email. The batch
+	// statement returns a count rather than rows, so the rows are read first —
+	// capped at MaxBulkIDs for exactly this reason.
+	previous := make(map[string]*Comment, len(ids))
+	for _, id := range ids {
+		c, err := s.repo.Get(ctx, id)
+		if err != nil {
+			// A row deleted since the page was rendered is normal; the batch
+			// below simply will not touch it.
+			continue
+		}
+		previous[id] = c
+	}
+
+	affected, err := s.repo.UpdateStatusMany(ctx, ids, status, s.timestamp())
+	if err != nil {
+		return 0, fmt.Errorf("update %d comments: %w", len(ids), err)
+	}
+	s.logger.InfoContext(ctx, "comments status changed in bulk",
+		slog.Int("requested", len(ids)),
+		slog.Int("affected", affected),
+		slog.String("status", string(status)),
+	)
+
+	if status == StatusApproved {
+		for _, id := range ids {
+			c, ok := previous[id]
+			if !ok || c.Status == StatusApproved {
+				continue
+			}
+			c.Status = StatusApproved
+			s.notifyApproved(ctx, c)
+		}
+	}
+	return affected, nil
+}
+
+// DeleteMany removes a batch of comments, each with its replies.
+func (s *Service) DeleteMany(ctx context.Context, commentIDs []string) (int, error) {
+	ids, err := cleanIDs(commentIDs)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := s.repo.DeleteMany(ctx, ids)
+	if err != nil {
+		return 0, fmt.Errorf("delete %d comments: %w", len(ids), err)
+	}
+	s.logger.InfoContext(ctx, "comments deleted in bulk",
+		slog.Int("requested", len(ids)), slog.Int("affected", affected))
+	return affected, nil
+}
+
+// cleanIDs trims, validates, deduplicates and caps a batch of comment IDs.
+func cleanIDs(commentIDs []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(commentIDs))
+	cleaned := make([]string, 0, len(commentIDs))
+	for _, raw := range commentIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		cleaned = append(cleaned, id)
+	}
+	if len(cleaned) == 0 {
+		return nil, &apperr.ValidationError{Field: "ids", Message: "must name at least one comment"}
+	}
+	if len(cleaned) > MaxBulkIDs {
+		return nil, &apperr.ValidationError{Field: "ids",
+			Message: fmt.Sprintf("must not name more than %d comments", MaxBulkIDs)}
+	}
+	return cleaned, nil
+}
+
+// notifyApproved tells the notifier about a comment that just became visible.
+//
+// It never returns an error and never fails the request: the comment is already
+// stored, and a mail server being down is not a reason to pretend otherwise.
+func (s *Service) notifyApproved(ctx context.Context, c *Comment) {
+	if s.notifier == nil || c == nil || c.Status != StatusApproved {
+		return
+	}
+
+	notification := Notification{Comment: c}
+	if c.ParentID != "" {
+		parent, err := s.repo.Get(ctx, c.ParentID)
+		if err != nil {
+			// Without the parent there is nobody to reply-notify; the admin
+			// notice can still go out.
+			s.logger.WarnContext(ctx, "resolve parent for notification",
+				slog.String("comment_id", c.ID), slog.Any("error", err))
+		} else {
+			notification.Parent = parent
+		}
+	}
+	if err := s.notifier.Notify(ctx, notification); err != nil {
+		s.logger.WarnContext(ctx, "notify about approved comment",
+			slog.String("comment_id", c.ID), slog.Any("error", err))
+	}
 }
 
 // Delete removes a comment and every reply beneath it.
@@ -449,6 +635,6 @@ func resolveParent(ctx context.Context, repo Repository, c *Comment) (*Comment, 
 type pendingReviewer struct{}
 
 // Review implements Moderator.
-func (pendingReviewer) Review(context.Context, *Comment) (CommentStatus, error) {
+func (pendingReviewer) Review(context.Context, *Comment, RequestMeta) (CommentStatus, error) {
 	return StatusPending, nil
 }

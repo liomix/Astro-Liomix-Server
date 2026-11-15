@@ -26,10 +26,30 @@ type Repository interface {
 	// not page: an adapter can answer it with one aggregate query even when a
 	// post has thousands of comments.
 	CountByPost(ctx context.Context, q CountQuery) (map[string]int, error)
+	// CountByStatus returns how many comments sit in each moderation state,
+	// honoring the slug and keyword filters. States with no comment are left
+	// out, and the caller fills in zeros — same convention as CountByPost.
+	//
+	// The console shows these next to the status tabs so an operator can see
+	// whether the queue is empty because everything is handled or because the
+	// filter is hiding it.
+	CountByStatus(ctx context.Context, q Query) (map[CommentStatus]int, error)
+	// CountSince returns how many comments were created at or after since, in
+	// any state. It answers the dashboard's "how much arrived today", which no
+	// listing can without paging through the day.
+	CountSince(ctx context.Context, since time.Time) (int, error)
 	// UpdateStatus stores a new moderation state and the time it changed,
 	// returning the comment as stored. It returns an error wrapping
 	// apperr.ErrNotFound when the comment does not exist.
 	UpdateStatus(ctx context.Context, commentID string, status CommentStatus, at time.Time) (*Comment, error)
+	// UpdateStatusMany applies one status to several comments and reports how
+	// many rows changed. IDs that no longer exist are skipped rather than
+	// failing the batch: an operator working through a queue may well be
+	// looking at a page that is a minute old.
+	UpdateStatusMany(ctx context.Context, commentIDs []string, status CommentStatus, at time.Time) (int, error)
+	// DeleteMany removes several comments, each with its replies. The count is
+	// the number of named comments that existed.
+	DeleteMany(ctx context.Context, commentIDs []string) (int, error)
 	// Delete removes commentID and every reply beneath it.
 	//
 	// Replies go with the parent on purpose: a reply that lost its parent would
@@ -42,6 +62,35 @@ type Repository interface {
 // Moderator decides the initial moderation state of a new comment. The default
 // implementation keeps everything pending; a spam filter or an ML classifier
 // plugs in here without changing the service.
+//
+// It sees RequestMeta because the useful filters need the client, and because
+// this service deliberately does not store it: an IP that never reaches the
+// database cannot leak from it.
 type Moderator interface {
-	Review(ctx context.Context, c *Comment) (CommentStatus, error)
+	Review(ctx context.Context, c *Comment, meta RequestMeta) (CommentStatus, error)
+}
+
+// RequestMeta is what the transport knows about a request and the domain does
+// not keep: the address, the user agent and the referrer. They exist for
+// filters and for logs, not for storage.
+type RequestMeta struct {
+	IP        string
+	UserAgent string
+	Referer   string
+}
+
+// Notification is "this comment became visible, and here is what it replies
+// to". Parent is nil for a top-level comment.
+type Notification struct {
+	Comment *Comment
+	Parent  *Comment
+}
+
+// Notifier delivers a notification about an approved comment.
+//
+// It is called after the comment is stored, and its error never fails the
+// request: a mail server being down must not turn into a failed comment. The
+// implementation is expected to be asynchronous for the same reason.
+type Notifier interface {
+	Notify(ctx context.Context, n Notification) error
 }

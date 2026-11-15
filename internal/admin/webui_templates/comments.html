@@ -1,13 +1,49 @@
 {{define "content"}}
-<div class="d-flex flex-wrap align-items-end justify-content-between gap-3 mb-3">
+<div class="page-head">
   <div>
-    <h1 class="h4 mb-1">评论审核</h1>
-    <p class="text-secondary small mb-0">新评论默认进入待审，通过后才对读者可见。</p>
+    <h1 class="page-title">评论管理</h1>
+    <p class="page-sub">新评论默认进入待审，通过后才对读者可见。</p>
   </div>
-  <div class="btn-group btn-group-sm" role="group" aria-label="按状态筛选">
-    {{range .Statuses}}<a class="btn {{if eq $.Status .}}btn-primary{{else}}btn-outline-secondary{{end}}" href="/admin/comments?status={{.}}">{{statusLabel .}}</a>{{end}}
-  </div>
+  <form class="d-flex flex-wrap gap-2" method="get" action="/admin/comments" role="search">
+    <input type="hidden" name="status" value="{{.Status}}">
+    <div class="search-field">
+      <span class="search-icon" aria-hidden="true">{{template "iconSearch"}}</span>
+      <label class="visually-hidden" for="q">搜索评论</label>
+      <input class="form-control form-control-sm" id="q" name="q" type="search" value="{{.Keyword}}"
+             placeholder="作者、邮箱、正文或文章" autocomplete="off" maxlength="100">
+    </div>
+    <button class="btn btn-sm btn-primary" type="submit">搜索</button>
+    {{if .Keyword}}<a class="btn btn-sm btn-outline-secondary" href="/admin/comments?status={{.Status}}">清除</a>{{end}}
+  </form>
 </div>
+
+<div class="d-flex justify-content-center mb-3">
+<div class="btn-group btn-group-sm" role="group" aria-label="按状态筛选">
+  {{range .Statuses}}
+  <a class="btn {{if eq $.Status .}}btn-primary{{else}}btn-outline-secondary{{end}}"
+     href="/admin/comments?status={{.}}{{if $.Keyword}}&amp;q={{urlquery $.Keyword}}{{end}}"
+     {{if eq $.Status .}}aria-current="page"{{end}}>
+    {{statusLabel .}}{{if $.Counts}}<span class="tab-count">{{index $.Counts .}}</span>{{end}}
+  </a>
+  {{end}}
+</div>
+</div>
+
+<form id="comments-bulk" class="bulk-bar" method="post" action="/admin/comments/bulk" data-bulk>
+  <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+  <input type="hidden" name="return" value="{{.Status}}">
+  <input type="hidden" name="q" value="{{.Keyword}}">
+  <span class="small text-secondary" data-bulk-count>未选中</span>
+  <label class="visually-hidden" for="comments-bulk-action">批量操作</label>
+  <select class="form-select form-select-sm bulk-select" id="comments-bulk-action" name="action">
+    <option value="approve">通过</option>
+    <option value="reject">拒绝</option>
+    <option value="spam">标记为垃圾</option>
+    <option value="delete">删除（含回复）</option>
+  </select>
+  <button class="btn btn-sm btn-primary" type="submit" disabled data-bulk-submit>执行</button>
+  <span class="small text-secondary">通过会触发回复邮件提醒；删除不可撤销。</span>
+</form>
 
 <div class="card shadow-sm">
   {{if .Comments}}
@@ -15,17 +51,23 @@
     <table class="table table-hover align-middle mb-0">
       <thead>
         <tr>
+          <th scope="col" class="text-center">
+            <input class="form-check-input" type="checkbox" data-bulk-all="comments-bulk" aria-label="全选">
+          </th>
           <th scope="col">作者</th>
           <th scope="col">评论</th>
           <th scope="col">文章</th>
-          <th scope="col">状态</th>
+          <th scope="col" class="text-center">状态</th>
           <th scope="col">时间</th>
-          <th scope="col">操作</th>
+          <th scope="col" class="text-end">操作</th>
         </tr>
       </thead>
       <tbody>
         {{range .Comments}}
         <tr>
+          <td class="text-center">
+            <input class="form-check-input" type="checkbox" data-bulk-id="{{.ID}}" aria-label="选择这条评论">
+          </td>
           <td>
             <div class="d-flex align-items-start gap-2">
               <span class="avatar avatar-sm" aria-hidden="true">{{firstRune .AuthorName}}</span>
@@ -37,15 +79,16 @@
           </td>
           <td><pre class="comment-body">{{.Body}}</pre></td>
           <td><code class="mono">{{.PostSlug}}</code></td>
-          <td><span class="badge rounded-pill {{statusBadge .Status}}">{{statusLabel .Status}}</span></td>
+          <td class="text-center"><span class="badge rounded-pill {{statusBadge .Status}}">{{statusLabel .Status}}</span></td>
           <td class="text-secondary small text-nowrap" title="{{fmtTime .CreatedAt}}">{{relTime .CreatedAt}}</td>
           <td>
-            <div class="d-flex flex-wrap align-items-start gap-1">
+            <div class="d-flex flex-wrap align-items-start justify-content-end gap-1">
               {{if ne .Status "approved"}}
               <form method="post" action="/admin/comments/{{.ID}}/status">
                 <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
                 <input type="hidden" name="status" value="approved">
                 <input type="hidden" name="return" value="{{$.Status}}">
+                <input type="hidden" name="q" value="{{$.Keyword}}">
                 <button class="btn btn-sm btn-outline-success" type="submit">{{template "iconCheck"}}通过</button>
               </form>
               {{end}}
@@ -54,6 +97,7 @@
                 <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
                 <input type="hidden" name="status" value="rejected">
                 <input type="hidden" name="return" value="{{$.Status}}">
+                <input type="hidden" name="q" value="{{$.Keyword}}">
                 <button class="btn btn-sm btn-outline-secondary" type="submit">{{template "iconX"}}拒绝</button>
               </form>
               {{end}}
@@ -62,12 +106,14 @@
                 <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
                 <input type="hidden" name="status" value="spam">
                 <input type="hidden" name="return" value="{{$.Status}}">
+                <input type="hidden" name="q" value="{{$.Keyword}}">
                 <button class="btn btn-sm btn-outline-warning" type="submit">{{template "iconAlert"}}垃圾</button>
               </form>
               {{end}}
               <form method="post" action="/admin/comments/{{.ID}}/delete"
                     data-confirm="删除这条评论及其全部回复？">
                 <input type="hidden" name="csrf" value="{{$.CSRFToken}}">
+                <input type="hidden" name="q" value="{{$.Keyword}}">
                 <button class="btn btn-sm btn-outline-danger" type="submit">{{template "iconTrash"}}删除</button>
               </form>
             </div>
@@ -76,6 +122,13 @@
         {{end}}
       </tbody>
     </table>
+  </div>
+  {{else if .Keyword}}
+  <div class="card-body text-center py-5">
+    <span class="empty-icon">{{template "iconSearch"}}</span>
+    <div class="fw-semibold small text-break">没有匹配「{{.Keyword}}」的评论</div>
+    <div class="text-secondary small">换个关键词，或清除搜索查看这个状态的全部评论。</div>
+    <a class="btn btn-sm btn-outline-secondary mt-3" href="/admin/comments?status={{.Status}}">清除搜索</a>
   </div>
   {{else}}
   <div class="card-body text-center py-5">
@@ -88,7 +141,8 @@
 
 {{if .NextCursor}}
 <div class="d-flex justify-content-end mt-3">
-  <a class="btn btn-sm btn-outline-secondary" href="/admin/comments?status={{.Status}}&cursor={{.NextCursor}}">下一页</a>
+  <a class="btn btn-sm btn-outline-secondary"
+     href="/admin/comments?status={{.Status}}{{if .Keyword}}&amp;q={{urlquery .Keyword}}{{end}}&amp;cursor={{urlquery .NextCursor}}">下一页</a>
 </div>
 {{end}}
 {{end}}

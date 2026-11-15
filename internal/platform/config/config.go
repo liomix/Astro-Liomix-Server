@@ -39,7 +39,72 @@ type Config struct {
 	Database Database
 	Comment  Comment
 	Admin    Admin
+	Mail     Mail
+	Spam     Spam
 }
+
+// Mail is the outbound notification channel. Everything is off by default: a
+// server that cannot send mail must still accept comments, so the feature is an
+// explicit choice rather than a side effect of setting a host.
+type Mail struct {
+	// Enabled turns notification sending on. MAIL_HOST alone is not enough:
+	// a host in the environment usually means "someone configured this
+	// somewhere", not "send mail from every comment".
+	Enabled bool
+	Host    string
+	Port    int
+	// TLS is how the connection is protected: "auto" picks implicit TLS on port
+	// 465 and STARTTLS everywhere else, which is what the common providers
+	// expect. "none" exists for a local mail catcher such as MailHog.
+	TLS      string
+	Username string
+	Password string
+	// From is the envelope sender. Receivers reject a mismatched From more
+	// often than they reject a plain one, so it is required whenever mail is on.
+	From     string
+	FromName string
+	// Admin is who receives "new comment" notices. Empty disables that half.
+	Admin string
+	// SiteName and SiteURL are used in subjects and links. A notification
+	// without a working link is worse than none.
+	SiteName string
+	SiteURL  string
+}
+
+// Spam configures the third-party content filter that runs before a comment is
+// stored. The default provider is "none", which means every comment starts
+// pending — the behaviour the service had before this existed.
+type Spam struct {
+	// Provider is none, akismet or llm.
+	Provider string
+	// AkismetKey and AkismetSiteURL are the WordPress.com key and the URL the
+	// site is registered under. Both are required for that provider.
+	AkismetKey     string
+	AkismetSiteURL string
+	// LLMEndpoint is an OpenAI-compatible /chat/completions URL. Model is the
+	// model name; Key may be empty for a local server.
+	LLMEndpoint string
+	LLMKey      string
+	LLMModel    string
+	// LLMTimeout bounds one classification request. A slow filter must not
+	// hold a reader's POST open indefinitely.
+	LLMTimeout time.Duration
+}
+
+// Spam providers.
+const (
+	SpamNone    = "none"
+	SpamAkismet = "akismet"
+	SpamLLM     = "llm"
+)
+
+// Mail TLS modes.
+const (
+	MailTLSAuto     = "auto"
+	MailTLSStartTLS = "starttls"
+	MailTLSImplicit = "implicit"
+	MailTLSNone     = "none"
+)
 
 // Database holds the PostgreSQL settings.
 type Database struct {
@@ -130,6 +195,15 @@ func Load() (*Config, error) {
 			// session on a shared laptop stops working.
 			SessionTTL: 7 * 24 * time.Hour,
 		},
+		Mail: Mail{
+			Port:     587,
+			TLS:      MailTLSAuto,
+			SiteName: "Astro Liomix",
+		},
+		Spam: Spam{
+			Provider:   SpamNone,
+			LLMTimeout: 15 * time.Second,
+		},
 	}
 
 	var errs []error
@@ -164,6 +238,29 @@ func Load() (*Config, error) {
 	cfg.Admin.BootstrapUsername = strings.TrimSpace(os.Getenv("ADMIN_BOOTSTRAP_USERNAME"))
 	cfg.Admin.BootstrapPassword = os.Getenv("ADMIN_BOOTSTRAP_PASSWORD")
 	loadBool("ADMIN_COOKIE_SECURE", &cfg.Admin.CookieSecure, &errs)
+
+	loadBool("MAIL_ENABLED", &cfg.Mail.Enabled, &errs)
+	cfg.Mail.Host = strings.TrimSpace(os.Getenv("MAIL_HOST"))
+	loadInt("MAIL_PORT", &cfg.Mail.Port, &errs)
+	cfg.Mail.TLS = strings.ToLower(envString("MAIL_TLS", cfg.Mail.TLS))
+	cfg.Mail.Username = strings.TrimSpace(os.Getenv("MAIL_USERNAME"))
+	cfg.Mail.Password = os.Getenv("MAIL_PASSWORD")
+	cfg.Mail.From = strings.TrimSpace(os.Getenv("MAIL_FROM"))
+	cfg.Mail.FromName = strings.TrimSpace(os.Getenv("MAIL_FROM_NAME"))
+	cfg.Mail.Admin = strings.TrimSpace(os.Getenv("MAIL_ADMIN"))
+	cfg.Mail.SiteName = envString("SITE_NAME", cfg.Mail.SiteName)
+	cfg.Mail.SiteURL = strings.TrimRight(envString("SITE_URL", ""), "/")
+	if cfg.Mail.FromName == "" {
+		cfg.Mail.FromName = cfg.Mail.SiteName
+	}
+
+	cfg.Spam.Provider = strings.ToLower(envString("SPAM_PROVIDER", cfg.Spam.Provider))
+	cfg.Spam.AkismetKey = strings.TrimSpace(os.Getenv("AKISMET_KEY"))
+	cfg.Spam.AkismetSiteURL = strings.TrimRight(envString("AKISMET_SITE_URL", cfg.Mail.SiteURL), "/")
+	cfg.Spam.LLMEndpoint = strings.TrimSpace(os.Getenv("LLM_ENDPOINT"))
+	cfg.Spam.LLMKey = strings.TrimSpace(os.Getenv("LLM_API_KEY"))
+	cfg.Spam.LLMModel = strings.TrimSpace(os.Getenv("LLM_MODEL"))
+	loadDuration("LLM_TIMEOUT", &cfg.Spam.LLMTimeout, &errs)
 
 	if err := errors.Join(errs...); err != nil {
 		return nil, fmt.Errorf("config: %w", err)
@@ -246,7 +343,7 @@ func (c *Config) validate() error {
 	if c.Database.ConnMaxLifetime <= 0 {
 		errs = append(errs, errors.New("DATABASE_CONN_MAX_LIFETIME must be positive"))
 	}
-	return errors.Join(errs...)
+	return errors.Join(append(errs, c.Mail.validate(), c.Spam.validate())...)
 }
 
 func envString(key, fallback string) string {
@@ -329,4 +426,70 @@ func loadBool(key string, dst *bool, errs *[]error) {
 		return
 	}
 	*dst = value
+}
+
+// validate reports every reason the mail settings cannot be used as written.
+// The checks only bite when mail is enabled: an unused MAIL_HOST left in a
+// shared environment file must not stop the server from starting.
+func (m Mail) validate() error {
+	if !m.Enabled {
+		return nil
+	}
+	var errs []error
+	if m.Host == "" {
+		errs = append(errs, errors.New("MAIL_HOST is required when MAIL_ENABLED=true"))
+	}
+	if m.Port <= 0 || m.Port > 65535 {
+		errs = append(errs, errors.New("MAIL_PORT must be between 1 and 65535"))
+	}
+	if m.From == "" {
+		errs = append(errs, errors.New("MAIL_FROM is required when MAIL_ENABLED=true"))
+	}
+	if !strings.Contains(m.From, "@") {
+		errs = append(errs, fmt.Errorf("MAIL_FROM %q is not an email address", m.From))
+	}
+	if m.Admin != "" && !strings.Contains(m.Admin, "@") {
+		errs = append(errs, fmt.Errorf("MAIL_ADMIN %q is not an email address", m.Admin))
+	}
+	switch m.TLS {
+	case MailTLSAuto, MailTLSStartTLS, MailTLSImplicit, MailTLSNone:
+	default:
+		errs = append(errs, fmt.Errorf("MAIL_TLS %q must be one of %s, %s, %s, %s",
+			m.TLS, MailTLSAuto, MailTLSStartTLS, MailTLSImplicit, MailTLSNone))
+	}
+	// Both halves of a login or neither: a username without a password fails
+	// at the first message, long after the operator stopped watching startup.
+	if (m.Username == "") != (m.Password == "") {
+		errs = append(errs, errors.New("MAIL_USERNAME and MAIL_PASSWORD must be set together"))
+	}
+	return errors.Join(errs...)
+}
+
+// validate reports every reason the spam settings cannot be used as written.
+func (s Spam) validate() error {
+	var errs []error
+	switch s.Provider {
+	case SpamNone:
+	case SpamAkismet:
+		if s.AkismetKey == "" {
+			errs = append(errs, errors.New("AKISMET_KEY is required when SPAM_PROVIDER=akismet"))
+		}
+		if s.AkismetSiteURL == "" {
+			errs = append(errs, errors.New("AKISMET_SITE_URL (or SITE_URL) is required when SPAM_PROVIDER=akismet"))
+		}
+	case SpamLLM:
+		if s.LLMEndpoint == "" {
+			errs = append(errs, errors.New("LLM_ENDPOINT is required when SPAM_PROVIDER=llm"))
+		}
+		if s.LLMModel == "" {
+			errs = append(errs, errors.New("LLM_MODEL is required when SPAM_PROVIDER=llm"))
+		}
+		if s.LLMTimeout <= 0 {
+			errs = append(errs, errors.New("LLM_TIMEOUT must be positive"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("SPAM_PROVIDER %q must be one of %s, %s, %s",
+			s.Provider, SpamNone, SpamAkismet, SpamLLM))
+	}
+	return errors.Join(errs...)
 }

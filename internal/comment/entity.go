@@ -35,6 +35,9 @@ const (
 	// asking for more posts at once than it could ever page through is not
 	// asking a question the API needs to answer.
 	MaxCountSlugs = 100
+	// MaxKeywordLength bounds a moderation search. A search is a human typing
+	// into a box, not a query language; anything longer is a client bug.
+	MaxKeywordLength = 100
 )
 
 // CommentStatus is the moderation state of a comment.
@@ -176,7 +179,16 @@ type Query struct {
 	// not one article at a time.
 	PostSlug string
 	Status   CommentStatus
-	Limit    int
+	// Keyword narrows the listing to comments whose author name, author email,
+	// body or post slug contains it, case-insensitively. It exists for the
+	// moderation console, where "did this person comment before?" is answered
+	// by a search rather than by paging through every post.
+	//
+	// Empty means no narrowing — and an empty search box must not become
+	// `ILIKE '%%'` with a wildcard, which is why the value is trimmed and
+	// escaped before it reaches storage.
+	Keyword string
+	Limit   int
 	// Cursor continues a listing after the row it names. A nil cursor starts at
 	// the newest comment.
 	//
@@ -197,6 +209,10 @@ func (q Query) Validate() error {
 	}
 	if q.Status != "" && !q.Status.Valid() {
 		return &apperr.ValidationError{Field: "status", Code: apperr.FieldInvalid, Message: "must be one of " + statusList}
+	}
+	if len(q.Keyword) > MaxKeywordLength {
+		return &apperr.ValidationError{Field: "q", Code: apperr.FieldTooLong,
+			Message: fmt.Sprintf("must be at most %d bytes", MaxKeywordLength)}
 	}
 	if q.Limit < 0 {
 		return &apperr.ValidationError{Field: "limit", Code: apperr.FieldOutOfRange, Message: "must not be negative"}

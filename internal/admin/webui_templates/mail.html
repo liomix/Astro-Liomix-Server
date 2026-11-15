@@ -1,0 +1,95 @@
+{{define "content"}}
+<div class="page-head">
+  <div>
+    <h1 class="page-title">邮件管理</h1>
+    <p class="page-sub">通知邮件的开关，以及这台服务器现在的 SMTP 状态。</p>
+  </div>
+</div>
+
+<div class="row g-3">
+  <div class="col-12 col-xl-7">
+    <section class="panel">
+      <header class="panel-head">
+        <div>
+          <h2 class="panel-title">通知开关</h2>
+          <p class="panel-sub">默认关闭；打开后才会有邮件发出</p>
+        </div>
+        <span class="badge rounded-pill {{if .Mail.Enabled}}text-bg-success{{else}}text-bg-secondary{{end}}">
+          {{if .Mail.Enabled}}SMTP 已配置{{else}}SMTP 未配置{{end}}
+        </span>
+      </header>
+      <div class="panel-body">
+        <form method="post" action="/admin/mail">
+          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+          <label class="switch-row">
+            <input class="form-check-input" type="checkbox" name="replyNotify" {{if .MailPrefs.ReplyNotify}}checked{{end}}>
+            <span>
+              <strong>回复提醒</strong>
+              <span class="switch-hint">评论通过审核后，给被它回复的人发一封邮件</span>
+            </span>
+          </label>
+          <label class="switch-row">
+            <input class="form-check-input" type="checkbox" name="adminNotify" {{if .MailPrefs.AdminNotify}}checked{{end}}>
+            <span>
+              <strong>新评论提醒</strong>
+              <span class="switch-hint">每条通过审核的评论都通知管理员邮箱</span>
+            </span>
+          </label>
+          <button class="btn btn-primary mt-3" type="submit">保存开关</button>
+          {{if not .Mail.Enabled}}<span class="small text-secondary ms-2">SMTP 未配置时开关可保存，但不会有邮件发出。</span>{{end}}
+        </form>
+      </div>
+    </section>
+
+    <section class="panel mt-3">
+      <header class="panel-head">
+        <div>
+          <h2 class="panel-title">测试发信</h2>
+          <p class="panel-sub">发一封测试邮件，确认 SMTP 设置可用</p>
+        </div>
+      </header>
+      <div class="panel-body">
+        <form method="post" action="/admin/mail/test" class="d-flex flex-wrap gap-2 align-items-end">
+          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+          <div class="flex-grow-1">
+            <label class="form-label small fw-semibold" for="mail-test-to">收件地址</label>
+            <input class="form-control" id="mail-test-to" name="to" type="email"
+                   value="{{.Mail.Admin}}" placeholder="留空则用管理员邮箱" {{if not .Mail.Enabled}}disabled{{end}}>
+          </div>
+          <button class="btn btn-outline-secondary" type="submit" {{if not .Mail.Enabled}}disabled{{end}}>发送测试</button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div class="col-12 col-xl-5">
+    <section class="panel">
+      <header class="panel-head">
+        <div>
+          <h2 class="panel-title">SMTP 配置</h2>
+          <p class="panel-sub">只读；由环境变量决定，改完需要重启</p>
+        </div>
+      </header>
+      <ul class="detail-list">
+        <li><span>状态</span><span>{{if .Mail.Enabled}}<span class="text-success-emphasis">已启用</span>{{else}}未启用（MAIL_ENABLED=false）{{end}}</span></li>
+        <li><span>服务器</span><span class="mono">{{if .Mail.Host}}{{.Mail.Host}}:{{.Mail.Port}}{{else}}—{{end}}</span></li>
+        <li><span>加密</span><span>{{if .Mail.TLS}}{{.Mail.TLS}}{{else}}auto{{end}}</span></li>
+        <li><span>发件人</span><span class="text-break">{{if .Mail.From}}{{.Mail.From}}{{else}}—{{end}}</span></li>
+        <li><span>管理员邮箱</span><span class="text-break">{{if .Mail.Admin}}{{.Mail.Admin}}{{else}}未配置{{end}}</span></li>
+      </ul>
+    </section>
+
+    <section class="panel mt-3">
+      <header class="panel-head">
+        <div>
+          <h2 class="panel-title">说明</h2>
+          <p class="panel-sub">邮件什么时候发出</p>
+        </div>
+      </header>
+      <div class="panel-body small text-secondary">
+        只有上面的开关打开、且评论通过审核时才会发信。审核操作本身不会触发邮件——开关关着的时候，通过评论不会发出任何邮件。SMTP 凭据只在服务器环境变量里，这个页面不保存、也不显示密码。
+      </div>
+    </section>
+  </div>
+</div>
+{{end}}

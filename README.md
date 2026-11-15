@@ -110,7 +110,7 @@ curl -X PATCH http://localhost:8080/api/v1/comments/<id>/status \
 │   │   ├── migrations/         # 0001_admin.sql
 │   │   ├── handler_http.go     # 路由、鉴权中间件、handler
 │   │   ├── webui.go            # /admin 服务端渲染控制台（Cookie + CSRF + 静态资源）
-│   │   ├── webui_templates/    # layout 与四个页面模板（内嵌进二进制）
+│   │   ├── webui_templates/    # layout 与首页/评论/账号设置/操作日志模板（内嵌进二进制）
 │   │   ├── webui_assets/css/   # bootstrap.min.css（5.3.9）+ app.css（主题覆盖）
 │   │   ├── webui_assets/js/    # app.js（toast/贪睡/确认）+ theme.js（明暗主题）
 │   │   └── dto.go              # 请求/响应形状（不含任何密码字段）
@@ -251,10 +251,13 @@ cmd ──┬──▶ comment ──┬──┐
 
 | 页面 | 作用 |
 |---|---|
+| `GET /admin` | 首页仪表盘：待审/今日新增/已通过/垃圾四个数字、待审评论、最近活动（只列登录） |
 | `GET /admin/login` | 登录表单；同一套账号体系，失败文案不区分账号不存在/密码错 |
-| `GET /admin/comments` | 待审队列（可切 approved/rejected/spam），每行可通过/拒绝/标垃圾/删除 |
-| `GET /admin/accounts` | 账号列表、新建、启停、改密、删除 |
-| `GET /admin/audit` | 审计日志，可按 `action` 过滤 |
+| `GET /admin/comments` | 评论管理：待审/已通过/已拒绝/垃圾四个状态，支持搜索与批量操作 |
+| `GET /admin/mail` | 邮件管理：两个通知开关（存数据库）、SMTP 只读状态、测试发信 |
+| `GET /admin/audit` | 操作日志全量列表，可按 `action` 过滤（首页只显示最近 8 次登录） |
+
+**导航是「首页 / 评论管理 / 邮件管理」，账号入口收在右上角头像菜单里。** 点「账号设置」打开的是当前页上的模态框（原生 `<dialog>`，不需要 Bootstrap JS），只有显示名和改密两个表单；没有账号列表、没有「新建管理员」、没有启停和删除按钮。多账号仍然可以通过 JSON API 完成，但页面上不提供——个人站点一个账号足够，每多一个账号就多一份要保护的凭据，也多一次把自己锁在外面的机会。
 
 - **与 JSON API 是两套认证**：页面用 `HttpOnly; SameSite=Strict; Path=/admin` 的 cookie，API 仍只认 `Authorization: Bearer`。这样 API 不会因为浏览器自动带 cookie 而变成 CSRF 面。
 - **CSRF 用同步令牌**：令牌放在另一个 HttpOnly cookie 里，服务端渲染进每个表单的隐藏域，POST 时常量时间比较。SameSite 是第一道防线，令牌是第二道——只靠其中任何一个都不够。
@@ -264,14 +267,20 @@ cmd ──┬──▶ comment ──┬──┐
 - **表单是 POST + 303 重定向（PRG）**：刷新不会重复提交；错误用 `?err=<code>` 回到列表页，文案在服务端映射，URL 里不携带任意文本。
 - **审核动作由控制台写审计**，账号动作复用 admin service 自己的审计，操作者都取当前会话的账号。
 - 生产环境把 `ADMIN_COOKIE_SECURE=true` 打开；本地 `http://localhost` 必须保持关闭，否则浏览器不存 cookie，登录会静默失败。
-- **通知统一是弹窗**：页面顶部居中（`position: fixed`）的 toast，成功 6 秒、错误 10 秒自动消失，也可手点关闭；不再有页面内嵌的横幅。
-- **初始密码提醒**：`admin_accounts.password_is_initial` 为 true 时，每个页面都会弹一条常驻提醒并带「去修改」链接，直到账号自己把密码改掉。管理员在控制台重置别人的密码会把它重新置为 true——目标用户仍然需要自己选一个密码。API 的账号对象也暴露 `passwordIsInitial`。
+- **通知统一是弹窗**：页面顶部居中（`position: fixed`）的 toast，全部会自动收起——成功 5 秒、信息 8 秒、警告 10–12 秒、错误 10 秒。鼠标悬停或键盘聚焦时倒计时暂停，`Esc` 关闭最新一条，也可以点 `×`；页面里不再有内嵌横幅。
+- **自动收起不会替你静默提醒**：只有手动点 `×` 才会写 10 分钟的贪睡 cookie。倒计时结束只是收起这一条，下一次页面加载仍会重新出现——提醒的目的是被看到，不是被计时器吞掉。
+- **初始密码提醒**：`admin_accounts.password_is_initial` 为 true 时，每个页面都会弹一条提醒并带「去修改」链接，直到账号自己把密码改掉。管理员在控制台重置别人的密码会把它重新置为 true——目标用户仍然需要自己选一个密码。API 的账号对象也暴露 `passwordIsInitial`。
 - **开发环境的登录页会显示初始凭据**：当恰好一个账号还持有初始密码、且服务运行在开发环境时，登录页顶部直接显示「账号 admin / 初始密码 astroadmin123」。这是刻意的开发便利，登录页本身是未认证页面——**不要把开发环境的控制台暴露到公网**。
 - **生产环境什么都不显示**：`APP_ENV=production` 时不预置默认账号、不写 `initial_password` 明文、登录页只给通用提示（账号由 `server admin create` 创建，忘记密码用 `server admin passwd` 重置）。
-- **初始密码提醒**：登录后每个页面顶部都会常驻「仍在使用初始密码」，带「去修改」链接，直到账号自己改密；改密后这行提示和 `initial_password` 明文一起消失。
+- **改密后提醒消失**：改密会同时清掉 `initial_password` 明文与 `password_is_initial` 标记，提示和登录页的初始凭据展示一起停止。
+- **主题色是 `#37B880`**：`app.css` 顶部定义 `--console-green-50…900` 八级色深，`--console-primary` 取 500，hover/active 取 600/700，浅色底和焦点环用同一色相的 `rgb(55 184 128 / …)`。组件只引用语义变量，改主题是改这一块。Bootstrap 的 `--bs-success` 也折进同一色系，避免徽章出现第二种绿。
+- **外壳是「卡片 + 胶囊导航」**：吸顶半透明导航、圆角 16px 的卡片与面板、四张统计卡、右侧活动流。首页的四个数字（待审 / 今日新增 / 已通过 / 垃圾）来自一次 `GROUP BY status` 加一次按时间计数，没有引入图表库。
+- **最近活动只列登录**：右侧活动流显示最近 8 次 `auth.login`（用户名、IP、相对时间），「全部 →」进入按该动作过滤的日志页。审核动作仍在完整日志里，因为「谁在什么时候删了哪条评论」需要能翻历史。
 - **样式基础是 Bootstrap 5.3.9**：`bootstrap.min.css` 本地引入（MIT，不打 CDN），**没有引入 Bootstrap 的 JS**。布局、卡片、表格、表单、按钮直接用 Bootstrap 类；`app.css` 只覆盖主题蓝、品牌标、头像、toast、评论正文等 Bootstrap 没有的部分。深色模式由 `theme.js` 在渲染前写 `data-bs-theme`，跟随系统。
 - **可用性**：所有交互元素有 `:focus-visible` 焦点环；按钮/输入有 hover、active、disabled 状态；表头 `scope`、当前导航 `aria-current`、跳过导航链接、toast `aria-live`；尊重 `prefers-reduced-motion`。页面不加载任何外部字体、图片或脚本，CSP 仍然是 `default-src 'none'`。
-- 已知取舍：账号页只列前 200 个（不分页）、审核队列每页 50 条带「下一页」、删除按钮用原生 `confirm()`。评论正文按纯文本转义展示，不渲染 Markdown。
+- **审核队列可以搜索**：关键词同时匹配作者名、邮箱、正文与文章 slug（`ILIKE`，`%` `_` `\` 已转义），并保留在状态切换、分页和审核动作的跳转里。搜索走的是同一份 WHERE 片段（`commentFilter`），列表和计数不会各说各话。
+- **状态标签带数量**：四个状态各显示当前筛选下的条数（一条 `GROUP BY status`），一眼能看出「队列空了」还是「被筛选藏了」。
+- 已知取舍：审核队列每页 50 条带「下一页」、删除按钮用原生 `confirm()`。评论正文按纯文本转义展示，不渲染 Markdown。
 
 ## 配置
 
@@ -295,6 +304,45 @@ cmd ──┬──▶ comment ──┬──┐
 | `ADMIN_BOOTSTRAP_USERNAME` | 空 | 可选：自动化部署时引导首个账号；手动创建请用 `server admin create`。与下一项必须同时设置 |
 | `ADMIN_BOOTSTRAP_PASSWORD` | 空 | 可选：引导账号的密码，≥12 字符；账号表非空时忽略 |
 | `ADMIN_COOKIE_SECURE` | `false` | `/admin` 控制台 cookie 是否加 `Secure`。HTTPS 部署必须打开；本地 http 必须关闭 |
+| `SPAM_PROVIDER` | `none` | 反垃圾来源：`none` / `akismet` / `llm`。启用后只可能把评论标成垃圾，不会自动发布 |
+| `AKISMET_KEY` | 空 | `SPAM_PROVIDER=akismet` 时必填；启动时会 `verify-key` 一次 |
+| `AKISMET_SITE_URL` | 空（回落到 `SITE_URL`） | Akismet 站点地址，必须与注册时一致 |
+| `LLM_ENDPOINT` | 空 | OpenAI 兼容的 `/chat/completions` 地址；`SPAM_PROVIDER=llm` 时必填 |
+| `LLM_MODEL` / `LLM_API_KEY` | 空 | 模型名与密钥；本地模型可以不给密钥。`LLM_TIMEOUT` 默认 `15s` |
+| `MAIL_ENABLED` | `false` | 打开通知邮件。关着的时候整个通知链路不参与 |
+| `MAIL_HOST` / `MAIL_PORT` / `MAIL_TLS` | 空 / `587` / `auto` | SMTP 服务器；`auto` 表示 465 用隐式 TLS、其余用 STARTTLS，本地 MailHog 用 `none` |
+| `MAIL_USERNAME` / `MAIL_PASSWORD` | 空 | 必须成对设置；明文连接下 `PlainAuth` 只对 localhost 生效 |
+| `MAIL_FROM` / `MAIL_FROM_NAME` | 空 / `SITE_NAME` | 信封发件人；开启邮件时必填 |
+| `MAIL_ADMIN` | 空 | 收到「新评论」提醒的地址；留空则只发回复提醒 |
+| `MAIL_NOTIFY_REPLY` | `true` | 被回复的人是否收邮件 |
+| `SITE_NAME` / `SITE_URL` | `Astro Liomix` / 空 | 邮件标题与正文里的站点名、文章链接前缀 |
+
+### 批量操作
+
+评论列表有批量入口（`POST /admin/comments/bulk`）：
+
+- 复选框通过 HTML5 的 `form="..."` 属性挂在表格外的表单上，所以每行原有的「通过 / 拒绝 / 删除」单条表单不用嵌套（嵌套表单是无效 HTML）。
+- 支持 通过 / 拒绝 / 标记垃圾 / 删除（含回复）。
+- 一次最多 100 条（`comment.MaxBulkIDs`），与一页的容量一致。
+- 批量审核只对**状态真正发生变化**的评论发通知：重复点「通过」不会反复给作者发信。
+- 审计只记一条 `comment.bulk.<action>`，detail 里同时记 `requested` 与 `affected`：审计要能回答「点了多少、实际改了多少」。
+
+### 反垃圾
+
+`comment.Moderator` 是唯一的接入点，`cmd/server/spam.go` 把第三方过滤器适配成它：
+
+- **Akismet**：`comment-check`，需要客户端 IP（`X-Forwarded-For` 一律不信任，取 `RemoteAddr`），启动时先 `verify-key`。
+- **LLM**：OpenAI 兼容接口，提示词要求返回 `{"spam":bool,"reason":"..."}`；解析器容忍代码块和前后解释，模型没给出 `spam` 字段就当失败。
+- 过滤器**只能降级**：判定垃圾 → 存成 `spam`；判定正常 → 仍然是 `pending`。让第三方决定「发布」，等于把站点交给它。
+- 过滤器不可用（超时、429、字段缺失）→ 记 warning，评论保持 `pending`，与没有过滤器时完全一致。
+
+### 邮件通知
+
+- **默认不发信**：回复提醒与管理员提醒是两个开关，存在 `admin_settings` 表里，默认都关。关着的时候通过评论不会发出任何邮件。
+- 开关在 `/admin/mail` 修改，改完立即生效（`cmd/server` 的适配器每条消息前读一次），不需要重启；SMTP 凭据仍只在环境变量里。
+- 两类邮件：**被回复的人**收到回复内容与文章链接；`MAIL_ADMIN` 收到每条通过评论的提醒。
+- 打开开关后，评论通过审核时触发（不是提交时）：`internal/comment` 在 `SetStatus` / `SetStatusMany` 里调 `Notifier`。自己回复自己、或父评论没有邮箱时跳过。
+- 发送是**异步队列**（`internal/platform/mail`，容量 256）：入队不阻塞请求，队列满就丢弃并记 warning；进程退出时最多等 5 秒把队列发完。SMTP 有连接/写超时，邮件服务器挂住不会拖住评论接口。
 
 ### 数据库
 

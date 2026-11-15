@@ -156,16 +156,11 @@ func (r *PostgresRepository) List(ctx context.Context, q Query) ([]*Comment, err
 	// instead of always emitting `post_slug = $1` is what lets one query serve
 	// both — an empty slug used to match nothing, which read as "no pending
 	// comments" no matter what was in the table.
-	args := make([]any, 0, 3)
-	where := " WHERE true"
-	if q.PostSlug != "" {
-		args = append(args, q.PostSlug)
-		where += fmt.Sprintf(" AND post_slug = $%d", len(args))
-	}
-	if q.Status != "" {
-		args = append(args, string(q.Status))
-		where += fmt.Sprintf(" AND status = $%d", len(args))
-	}
+	//
+	// The filter itself comes from commentFilter so counting and listing cannot
+	// disagree about what a keyword means: two WHERE clauses that drifted apart
+	// would make the tab counts describe a different set than the rows below.
+	where, args := commentFilter(q)
 
 	after := ""
 	if q.Cursor != nil {
@@ -201,6 +196,88 @@ func (r *PostgresRepository) List(ctx context.Context, q Query) ([]*Comment, err
 		return nil, fmt.Errorf("list comments for %q: %w", q.PostSlug, err)
 	}
 	return comments, nil
+}
+
+// commentFilter builds the WHERE clause a listing and a count share, plus the
+// arguments it needs, numbered from $1.
+//
+// Callers that add parameters afterwards must append to the returned slice, so
+// the placeholders keep counting up.
+func commentFilter(q Query) (string, []any) {
+	args := make([]any, 0, 4)
+	where := " WHERE true"
+
+	if q.PostSlug != "" {
+		args = append(args, q.PostSlug)
+		where += fmt.Sprintf(" AND post_slug = $%d", len(args))
+	}
+	if q.Status != "" {
+		args = append(args, string(q.Status))
+		where += fmt.Sprintf(" AND status = $%d", len(args))
+	}
+	if q.Keyword != "" {
+		// One parameter reused by four columns: the keyword means the same
+		// thing in each of them, and four copies of it would be four chances
+		// for the placeholders to drift.
+		args = append(args, "%"+escapeLikePattern(q.Keyword)+"%")
+		column := fmt.Sprintf("ILIKE $%d", len(args))
+		where += " AND (author_name " + column +
+			" OR author_email " + column +
+			" OR body " + column +
+			" OR post_slug " + column + ")"
+	}
+	return where, args
+}
+
+// escapeLikePattern neutralises the wildcards in a user's search text, so
+// searching for `50%` looks for the literal percent sign instead of matching
+// every comment. PostgreSQL's LIKE treats backslash as the escape character by
+// default, so it has to be doubled first.
+func escapeLikePattern(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return replacer.Replace(value)
+}
+
+// CountByStatus returns how many comments sit in each moderation state.
+//
+// One aggregate for all states rather than four counts: the console renders
+// them together, and four round trips would also let a comment approved
+// between two of them appear in neither total.
+func (r *PostgresRepository) CountByStatus(ctx context.Context, q Query) (map[CommentStatus]int, error) {
+	// Status is deliberately dropped: the answer is the count of every state.
+	where, args := commentFilter(Query{PostSlug: q.PostSlug, Keyword: q.Keyword})
+
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT status, count(*) FROM comments`+where+` GROUP BY status`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("count comments by status: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[CommentStatus]int, 4)
+	for rows.Next() {
+		var status CommentStatus
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("count comments by status: %w", err)
+		}
+		counts[status] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("count comments by status: %w", err)
+	}
+	return counts, nil
+}
+
+// CountSince counts comments created at or after since, in any state.
+func (r *PostgresRepository) CountSince(ctx context.Context, since time.Time) (int, error) {
+	var total int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT count(*) FROM comments WHERE created_at >= $1`, since.UTC()).Scan(&total)
+	if err != nil {
+		return 0, fmt.Errorf("count comments since %s: %w", since.Format(time.RFC3339), err)
+	}
+	return total, nil
 }
 
 // CountByPost returns how many comments each requested post has, honoring the
@@ -265,6 +342,68 @@ func (r *PostgresRepository) UpdateStatus(ctx context.Context, commentID string,
 		return nil, fmt.Errorf("update comment %q: %w", commentID, err)
 	}
 	return c, nil
+}
+
+// UpdateStatusMany applies one status to several comments in one statement.
+//
+// Missing IDs are not an error: the caller is an operator working through a
+// queue, and a row deleted by somebody else since the page rendered is a normal
+// race, not a failed request. The count says how many rows actually changed.
+func (r *PostgresRepository) UpdateStatusMany(ctx context.Context, commentIDs []string, status CommentStatus, at time.Time) (int, error) {
+	if len(commentIDs) == 0 {
+		return 0, nil
+	}
+	placeholders, args := idPlaceholders(commentIDs)
+	args = append(args, string(status), at.UTC())
+
+	query := `UPDATE comments SET status = $` + fmt.Sprint(len(commentIDs)+1) +
+		`, updated_at = $` + fmt.Sprint(len(commentIDs)+2) +
+		` WHERE id IN (` + placeholders + `)`
+
+	result, err := r.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, fmt.Errorf("update %d comments: %w", len(commentIDs), err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("update %d comments: %w", len(commentIDs), err)
+	}
+	return int(affected), nil
+}
+
+// DeleteMany removes several comments and, through the foreign key, their
+// replies. The count is the number of named rows that existed.
+func (r *PostgresRepository) DeleteMany(ctx context.Context, commentIDs []string) (int, error) {
+	if len(commentIDs) == 0 {
+		return 0, nil
+	}
+	placeholders, args := idPlaceholders(commentIDs)
+
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM comments WHERE id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("delete %d comments: %w", len(commentIDs), err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("delete %d comments: %w", len(commentIDs), err)
+	}
+	return int(affected), nil
+}
+
+// idPlaceholders numbers the IDs from $1 and returns the argument slice that
+// matches, so a caller can append its own parameters afterwards.
+//
+// The IDs travel as parameters like every other user value; only the count of
+// placeholders is interpolated, and that count is bounded by the service.
+func idPlaceholders(ids []string) (string, []any) {
+	args := make([]any, 0, len(ids))
+	placeholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+	return strings.Join(placeholders, ", "), args
 }
 
 // Delete removes the comment and every reply beneath it.

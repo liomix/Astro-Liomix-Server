@@ -25,6 +25,7 @@ type memoryRepository struct {
 	mu       sync.Mutex
 	accounts map[string]*Account
 	sessions map[string]*Session
+	settings map[string]string
 }
 
 var _ Repository = (*memoryRepository)(nil)
@@ -33,6 +34,7 @@ func newMemoryRepository() *memoryRepository {
 	return &memoryRepository{
 		accounts: make(map[string]*Account),
 		sessions: make(map[string]*Session),
+		settings: make(map[string]string),
 	}
 }
 
@@ -169,6 +171,25 @@ func (r *memoryRepository) DeleteAccount(ctx context.Context, accountID string) 
 		if s.AccountID == accountID {
 			delete(r.sessions, id)
 		}
+	}
+	return nil
+}
+
+func (r *memoryRepository) Settings(context.Context) (map[string]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]string, len(r.settings))
+	for key, value := range r.settings {
+		out[key] = value
+	}
+	return out, nil
+}
+
+func (r *memoryRepository) PutSettings(_ context.Context, values map[string]string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, value := range values {
+		r.settings[key] = value
 	}
 	return nil
 }

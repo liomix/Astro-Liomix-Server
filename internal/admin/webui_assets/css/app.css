@@ -2,23 +2,56 @@
  *
  * Bootstrap provides layout, cards, tables, forms, buttons and the light/dark
  * variables. This file only adds the pieces it does not: a brand mark, avatars,
- * status toasts, the comment body, and a few token overrides that keep the
- * console's blue. Everything here reads Bootstrap's own CSS variables, so dark
- * mode (data-bs-theme) works without a second palette.
+ * status toasts, the comment body, and the console's own palette. Everything
+ * here reads Bootstrap's own CSS variables, so dark mode (data-bs-theme) works
+ * without a second palette.
  */
 
+/* The palette is one hue at eight depths. Components never pick a hex value:
+ * they pick the depth that matches the role, so a future re-brand is a single
+ * block of edits. #37B880 is the brand green (500). */
 :root {
-  --console-primary: #2563eb;
-  --console-primary-hover: #1d4ed8;
+  --console-green-50: #eefaf4;
+  --console-green-100: #d7f3e5;
+  --console-green-200: #b0e6cd;
+  --console-green-300: #7fd6ae;
+  --console-green-400: #4fc494;
+  --console-green-500: #37b880;
+  --console-green-600: #2b9c6b;
+  --console-green-700: #227a54;
+  --console-green-800: #1a5c40;
+  --console-green-900: #14442f;
+
+  --console-primary: var(--console-green-500);
+  --console-primary-hover: var(--console-green-600);
+  --console-primary-active: var(--console-green-700);
+  /* Tinted surfaces and rings: the same hue at low alpha, so they sit on top of
+   * any background without a second set of light/dark values. */
+  --console-primary-soft: rgb(55 184 128 / .12);
+  --console-primary-softer: rgb(55 184 128 / .07);
+  --console-primary-ring: rgb(55 184 128 / .30);
+  --console-primary-ink: var(--console-green-700);
   --console-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Consolas, monospace;
 }
 
 :root,
 [data-bs-theme="light"] {
-  --bs-link-color: var(--console-primary);
-  --bs-link-color-rgb: 37, 99, 235;
-  --bs-link-hover-color: var(--console-primary-hover);
-  --bs-link-hover-color-rgb: 29, 78, 216;
+  /* Bootstrap's own green is a different hue from the brand one; folding it
+   * into the palette keeps badges, outline buttons and validation text from
+   * looking like a second product. */
+  --bs-success: var(--console-green-600);
+  --bs-success-rgb: 43, 156, 107;
+  --bs-link-color: var(--console-primary-ink);
+  --bs-link-color-rgb: 34, 122, 84;
+  --bs-link-hover-color: var(--console-green-800);
+  --bs-link-hover-color-rgb: 26, 92, 64;
+}
+[data-bs-theme="dark"] {
+  --bs-link-color: var(--console-green-300);
+  --bs-link-color-rgb: 127, 214, 174;
+  --bs-link-hover-color: var(--console-green-200);
+  --bs-link-hover-color-rgb: 176, 230, 205;
+  --console-primary-ink: var(--console-green-300);
 }
 
 .btn-primary {
@@ -26,10 +59,13 @@
   --bs-btn-border-color: var(--console-primary);
   --bs-btn-hover-bg: var(--console-primary-hover);
   --bs-btn-hover-border-color: var(--console-primary-hover);
-  --bs-btn-active-bg: #1e40af;
-  --bs-btn-active-border-color: #1e40af;
+  --bs-btn-active-bg: var(--console-primary-active);
+  --bs-btn-active-border-color: var(--console-primary-active);
   --bs-btn-disabled-bg: var(--console-primary);
   --bs-btn-disabled-border-color: var(--console-primary);
+  --bs-btn-color: #fff;
+  --bs-btn-hover-color: #fff;
+  --bs-btn-active-color: #fff;
 }
 
 /* Scrollbars are invisible everywhere in the console, but scrolling still works:
@@ -56,7 +92,34 @@ body,
   border: 0;
 }
 
-/* Header */
+/* Shell: a sticky translucent bar, pill tabs, and an avatar menu that needs no
+ * JavaScript (a <details> element opens it, and app.js closes it on an outside
+ * click). */
+.app-body {
+  background:
+    radial-gradient(1100px 520px at 10% -12%, rgb(55 184 128 / .10), transparent 60%),
+    radial-gradient(820px 420px at 100% 0%, rgb(55 184 128 / .06), transparent 55%),
+    var(--bs-tertiary-bg);
+}
+[data-bs-theme="dark"] .app-body {
+  background:
+    radial-gradient(1100px 520px at 10% -12%, rgb(55 184 128 / .22), transparent 60%),
+    radial-gradient(820px 420px at 100% 0%, rgb(55 184 128 / .10), transparent 55%),
+    var(--bs-tertiary-bg);
+}
+
+.app-nav {
+  background: var(--bs-body-bg);
+  background: color-mix(in srgb, var(--bs-body-bg) 86%, transparent);
+  backdrop-filter: saturate(180%) blur(10px);
+  border-bottom: 1px solid var(--bs-border-color-translucent);
+  z-index: 1030;
+}
+.app-nav-inner { display: flex; align-items: center; gap: 1.25rem; height: 3.75rem; }
+
+.app-brand { display: flex; align-items: center; gap: .6rem; text-decoration: none; color: var(--bs-body-color); }
+.app-brand-text { font-weight: 650; font-size: .95rem; letter-spacing: -.01em; }
+
 .brand-mark {
   display: inline-flex;
   align-items: center;
@@ -66,22 +129,65 @@ body,
   flex: none;
   border-radius: .625rem;
   color: #fff;
-  background: linear-gradient(145deg, #3b82f6, #1d4ed8);
+  background: linear-gradient(145deg, var(--console-green-400), var(--console-green-700));
   box-shadow: inset 0 1px 0 rgb(255 255 255 / .25), var(--bs-box-shadow-sm);
 }
 .brand-mark svg { width: 1.1rem; height: 1.1rem; }
-.navbar-brand { font-size: .925rem; letter-spacing: -.01em; }
 
-.app-nav .nav-link {
-  padding: .375rem .75rem;
-  border-radius: .5rem;
+.app-tabs { gap: .25rem; flex-wrap: nowrap; }
+.app-tabs .nav-link {
+  padding: .4rem .95rem;
+  border-radius: 999px;
   font-size: .85rem;
   font-weight: 500;
   color: var(--bs-secondary-color);
 }
-.app-nav .nav-link:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); }
-.app-nav .nav-link.active { background: rgb(37 99 235 / .10); color: var(--console-primary); }
-[data-bs-theme="dark"] .app-nav .nav-link.active { background: rgb(96 165 250 / .16); color: #93c5fd; }
+.app-tabs .nav-link:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+.app-tabs .nav-link.active { background: #1f2937; color: #fff; }
+.app-tabs .nav-link.active:hover { background: #111827; color: #fff; }
+[data-bs-theme="dark"] .app-tabs .nav-link.active { background: #e5e7eb; color: #111827; }
+[data-bs-theme="dark"] .app-tabs .nav-link.active:hover { background: #f3f4f6; color: #111827; }
+
+.avatar-menu { position: relative; }
+.avatar-summary { list-style: none; cursor: pointer; display: inline-flex; border-radius: 999px; }
+.avatar-summary::-webkit-details-marker { display: none; }
+.avatar-summary:focus-visible { outline: 2px solid var(--console-primary); outline-offset: 2px; }
+.avatar-summary .avatar {
+  width: 2.2rem;
+  height: 2.2rem;
+  background: linear-gradient(145deg, var(--console-green-100), var(--console-green-200));
+  color: var(--console-green-700);
+}
+[data-bs-theme="dark"] .avatar-summary .avatar { background: rgb(55 184 128 / .24); color: var(--console-green-200); }
+.avatar-menu[open] .avatar-summary .avatar { box-shadow: 0 0 0 3px var(--console-primary-ring); }
+
+.avatar-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + .55rem);
+  width: 15rem;
+  padding: .4rem;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color-translucent);
+  border-radius: .9rem;
+  box-shadow: 0 18px 40px -18px rgb(16 24 40 / .35);
+  z-index: 1040;
+}
+.avatar-panel-head { padding: .5rem .625rem .6rem; border-bottom: 1px solid var(--bs-border-color-translucent); margin-bottom: .35rem; }
+.avatar-item {
+  display: block;
+  width: 100%;
+  padding: .5rem .625rem;
+  border: 0;
+  border-radius: .55rem;
+  background: none;
+  text-align: left;
+  color: var(--bs-body-color);
+  text-decoration: none;
+  font-size: .85rem;
+}
+.avatar-item:hover { background: var(--bs-tertiary-bg); }
+.avatar-item.is-current { color: var(--console-primary); font-weight: 600; }
 
 .avatar {
   display: inline-flex;
@@ -99,12 +205,124 @@ body,
 }
 .avatar-sm { width: 1.75rem; height: 1.75rem; font-size: .68rem; }
 
+/* Page head: title, one line of context, and the page's primary action. */
+.page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+.page-title { font-size: 1.5rem; line-height: 1.3; font-weight: 650; letter-spacing: -.015em; margin: 0 0 .3rem; }
+.page-sub { margin: 0; font-size: .85rem; color: var(--bs-secondary-color); }
+
+/* Dashboard cards. Fixed height alignment comes from the grid, not from a
+ * magic number in the card. */
+.stat-card {
+  height: 100%;
+  padding: 1rem 1.15rem;
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color-translucent);
+  border-radius: 1rem;
+  box-shadow: 0 1px 2px rgb(16 24 40 / .04);
+}
+.stat-label { font-size: .78rem; color: var(--bs-secondary-color); }
+.stat-value { font-size: 1.8rem; font-weight: 650; letter-spacing: -.02em; line-height: 1.25; font-variant-numeric: tabular-nums; }
+.stat-note { margin-top: .5rem; font-size: .72rem; color: var(--bs-secondary-color); line-height: 1.5; }
+.stat-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.15rem;
+  height: 2.15rem;
+  flex: none;
+  border-radius: .7rem;
+}
+.stat-icon svg { width: 1.05rem; height: 1.05rem; }
+.stat-icon.warn { background: #fff6e5; color: #b45309; }
+.stat-icon.info { background: var(--console-primary-soft); color: var(--console-primary-ink); }
+.stat-icon.ok { background: #e7f8ef; color: #047857; }
+.stat-icon.danger { background: #fdecec; color: #b42318; }
+[data-bs-theme="dark"] .stat-icon.warn { background: rgb(180 83 9 / .22); color: #fcd34d; }
+[data-bs-theme="dark"] .stat-icon.info { background: rgb(55 184 128 / .22); color: var(--console-green-300); }
+[data-bs-theme="dark"] .stat-icon.ok { background: rgb(4 120 87 / .24); color: #6ee7b7; }
+[data-bs-theme="dark"] .stat-icon.danger { background: rgb(180 35 24 / .24); color: #fca5a5; }
+
+.panel {
+  background: var(--bs-body-bg);
+  border: 1px solid var(--bs-border-color-translucent);
+  border-radius: 1rem;
+  box-shadow: 0 1px 2px rgb(16 24 40 / .04);
+  overflow: hidden;
+}
+.panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1rem 1.25rem .35rem; }
+.panel-title { font-size: .95rem; font-weight: 650; margin: 0; }
+.panel-sub { margin: .15rem 0 0; font-size: .75rem; color: var(--bs-secondary-color); }
+.panel-link { font-size: .78rem; color: var(--console-primary); text-decoration: none; white-space: nowrap; }
+.panel-link:hover { text-decoration: underline; }
+.panel-body { padding: .9rem 1.25rem 1.25rem; }
+.panel-empty { padding: 2.5rem 1.25rem; text-align: center; }
+
+/* Activity feed: one row per event, avatar on the left, time at the bottom.
+ * The same list renders pending comments and the audit trail. */
+.feed { list-style: none; margin: 0; padding: .25rem 1.25rem 1rem; }
+.feed-item { display: flex; align-items: flex-start; gap: .75rem; padding: .7rem 0; border-bottom: 1px solid var(--bs-border-color-translucent); }
+.feed-item:last-child { border-bottom: 0; }
+.feed-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  flex: none;
+  border-radius: 999px;
+  background: var(--bs-tertiary-bg);
+  color: var(--bs-secondary-color);
+  font-size: .72rem;
+  font-weight: 650;
+}
+.feed-body { min-width: 0; flex: 1 1 auto; }
+.feed-title { font-size: .84rem; line-height: 1.45; word-break: break-word; }
+.feed-text {
+  margin-top: .15rem;
+  font-size: .78rem;
+  line-height: 1.55;
+  color: var(--bs-secondary-color);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.feed-meta { margin-top: .25rem; font-size: .72rem; color: var(--bs-secondary-color); }
+.feed-action { align-self: center; font-size: .75rem; color: var(--console-primary); text-decoration: none; white-space: nowrap; }
+.feed-action:hover { text-decoration: underline; }
+
+/* Read-only rows on the profile page. */
+.detail-list { list-style: none; margin: 0; padding: .25rem 1.25rem 1.25rem; }
+.detail-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .6rem 0;
+  border-bottom: 1px solid var(--bs-border-color-translucent);
+  font-size: .82rem;
+}
+.detail-list li:last-child { border-bottom: 0; }
+.detail-list li > span:first-child { color: var(--bs-secondary-color); white-space: nowrap; }
+
 /* Buttons with inline SVG icons */
 .btn { display: inline-flex; align-items: center; justify-content: center; gap: .35rem; }
 .btn svg { width: .9rem; height: .9rem; flex: none; }
 .btn-sm svg { width: .82rem; height: .82rem; }
 
 /* Keep the table's square corners inside the rounded card. */
+.card {
+  border-color: var(--bs-border-color-translucent);
+  border-radius: 1rem;
+}
 .card.shadow-sm { overflow: hidden; }
 
 /* Tables */
@@ -243,42 +461,143 @@ body,
 }
 .console-toast .toast-close:hover { opacity: 1; background: rgb(0 0 0 / .06); }
 
-/* Inline password reset inside the account row */
-.inline-details summary { list-style: none; cursor: pointer; }
-.inline-details summary::-webkit-details-marker { display: none; }
-.inline-details[open] { flex-basis: 100%; }
-.inline-form {
-  display: flex;
-  gap: .375rem;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: .5rem;
-  padding: .5rem;
-  border-radius: .5rem;
-  background: var(--bs-tertiary-bg);
-}
-.inline-form .form-control { width: 9rem; }
-
 .filter-input { width: 16rem; }
+
+/* Batch selection bar: a fixed strip above the table, with the action picker
+ * and the count. It stays visible while scrolling so the selection is never
+ * hidden from the person who made it. */
+.bulk-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: 1rem;
+}
+.card-header .bulk-bar { margin-bottom: 0; }
+.bulk-select { width: 12rem; }
+
+/* Search box with a leading icon. The icon is pointer-events:none and sits
+ * above the field, so a click lands on the input instead of being swallowed. */
+.search-field { position: relative; width: 18rem; }
+.search-icon {
+  position: absolute;
+  top: 50%;
+  left: .625rem;
+  transform: translateY(-50%);
+  display: inline-flex;
+  color: var(--bs-secondary-color);
+  pointer-events: none;
+}
+.search-icon svg { width: .9rem; height: .9rem; }
+.search-field .form-control { padding-left: 2rem; }
+
+/* Count beside a tab label. Same shape as a badge, but it inherits the
+ * button's colours so the active tab stays readable in both themes. */
+.tab-count {
+  display: inline-block;
+  min-width: 1.25rem;
+  margin-left: .375rem;
+  padding: 0 .3rem;
+  border-radius: 999px;
+  background: rgb(0 0 0 / .10);
+  font-size: .68rem;
+  font-weight: 650;
+  line-height: 1.4;
+  text-align: center;
+  vertical-align: 1px;
+}
+.btn-primary .tab-count { background: rgb(255 255 255 / .22); }
+[data-bs-theme="dark"] .tab-count { background: rgb(255 255 255 / .14); }
+
+/* Checkboxes: Bootstrap's default ring is blue and its float placement fights
+ * a table cell. One ring, one checked colour, and a row tint so a selection is
+ * visible without hunting for the box that caused it. */
+.form-check-input {
+  width: 1.1rem;
+  height: 1.1rem;
+  margin: 0;
+  cursor: pointer;
+  border-color: var(--bs-border-color);
+}
+.form-check-input:checked,
+.form-check-input:indeterminate {
+  background-color: var(--console-primary);
+  border-color: var(--console-primary);
+}
+.form-check-input:focus {
+  border-color: var(--console-primary);
+  box-shadow: 0 0 0 .2rem var(--console-primary-ring);
+}
+.table > tbody > tr > td > .form-check-input { float: none; }
+.table > tbody > tr.is-selected > * { --bs-table-bg-state: var(--console-primary-softer); }
+
+/* Account settings dialog. <dialog> gives us the backdrop, focus trap and
+ * Escape handling; the styling is ours. */
+.app-dialog {
+  width: min(26rem, calc(100% - 2rem));
+  max-height: calc(100vh - 4rem);
+  padding: 0;
+  border: 0;
+  border-radius: 1rem;
+  background: var(--bs-body-bg);
+  color: var(--bs-body-color);
+  box-shadow: 0 32px 64px -24px rgb(16 24 40 / .45);
+}
+.app-dialog::backdrop { background: rgb(16 24 40 / .42); backdrop-filter: blur(2px); }
+.app-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem .25rem;
+}
+.app-dialog-body { padding: .75rem 1.25rem 1.25rem; }
+.dialog-close {
+  border: 0;
+  background: none;
+  color: var(--bs-secondary-color);
+  font-size: 1.25rem;
+  line-height: 1;
+  padding: .25rem .5rem;
+  border-radius: .5rem;
+}
+.dialog-close:hover { background: var(--bs-tertiary-bg); color: var(--bs-body-color); }
+.dialog-divider { height: 1px; background: var(--bs-border-color-translucent); margin: 1rem 0; }
+
+/* Switch rows on the mail page: the whole row is the label, so the target is
+ * the text as well as the box. */
+.switch-row {
+  display: flex;
+  align-items: flex-start;
+  gap: .75rem;
+  padding: .75rem 0;
+  border-bottom: 1px solid var(--bs-border-color-translucent);
+  cursor: pointer;
+}
+.switch-row:last-of-type { border-bottom: 0; }
+.switch-row .form-check-input { flex: none; margin-top: .15rem; }
+.switch-row strong { display: block; font-size: .875rem; font-weight: 600; }
+.switch-hint { display: block; margin-top: .15rem; font-size: .78rem; color: var(--bs-secondary-color); }
 
 /* Login page owns the viewport, without the app's container padding. */
 .auth main { max-width: none; padding: 0; }
 .auth-shell {
   background:
-    radial-gradient(900px 420px at 18% -10%, rgb(37 99 235 / .10), transparent 60%),
-    radial-gradient(700px 380px at 100% 0%, rgb(16 185 129 / .06), transparent 55%),
+    radial-gradient(900px 420px at 18% -10%, rgb(55 184 128 / .14), transparent 60%),
+    radial-gradient(700px 380px at 100% 0%, rgb(55 184 128 / .08), transparent 55%),
     var(--bs-tertiary-bg);
 }
 [data-bs-theme="dark"] .auth-shell {
   background:
-    radial-gradient(900px 420px at 18% -10%, rgb(37 99 235 / .22), transparent 60%),
-    radial-gradient(700px 380px at 100% 0%, rgb(16 185 129 / .10), transparent 55%),
+    radial-gradient(900px 420px at 18% -10%, rgb(55 184 128 / .22), transparent 60%),
+    radial-gradient(700px 380px at 100% 0%, rgb(55 184 128 / .12), transparent 55%),
     var(--bs-tertiary-bg);
 }
 .login-card { width: min(24rem, 100%); }
 
 @media (max-width: 575.98px) {
   .filter-input { width: 100%; }
+  .search-field { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

@@ -674,3 +674,30 @@ func TestInitialCredential(t *testing.T) {
 		t.Errorf("InitialCredential(grace) = %q, %q, %v, %v; want grace", username, password, ok, err)
 	}
 }
+
+func TestMailPreferencesDefaultOffAndPersist(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	env := newTestEnv(t)
+
+	// A fresh deployment sends nothing until somebody turns a switch on.
+	prefs, err := env.svc.MailPreferences(ctx)
+	if err != nil {
+		t.Fatalf("MailPreferences() error = %v", err)
+	}
+	if prefs.ReplyNotify || prefs.AdminNotify {
+		t.Errorf("prefs = %+v, want both off by default", prefs)
+	}
+
+	actor := systemActor()
+	if err := env.svc.SetMailPreferences(ctx, MailPreferences{ReplyNotify: true}, actor); err != nil {
+		t.Fatalf("SetMailPreferences() error = %v", err)
+	}
+	prefs, err = env.svc.MailPreferences(ctx)
+	if err != nil {
+		t.Fatalf("MailPreferences() error = %v", err)
+	}
+	if !prefs.ReplyNotify || prefs.AdminNotify {
+		t.Errorf("prefs = %+v, want only reply notify on", prefs)
+	}
+}

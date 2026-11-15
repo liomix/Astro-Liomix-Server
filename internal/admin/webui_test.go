@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -42,6 +43,30 @@ func (f *fakeModeration) List(_ context.Context, q ModerationQuery) (ModerationP
 	return ModerationPage{Items: items}, nil
 }
 
+func (f *fakeModeration) Counts(_ context.Context, q ModerationQuery) (map[string]int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	counts := map[string]int{"pending": 0, "approved": 0, "rejected": 0, "spam": 0}
+	for _, item := range f.items {
+		counts[item.Status]++
+	}
+	return counts, nil
+}
+
+func (f *fakeModeration) CountSince(_ context.Context, since time.Time) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	total := 0
+	for _, item := range f.items {
+		if !item.CreatedAt.Before(since) {
+			total++
+		}
+	}
+	return total, nil
+}
+
 func (f *fakeModeration) SetStatus(_ context.Context, commentID, status string) (ModerationComment, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -53,6 +78,30 @@ func (f *fakeModeration) SetStatus(_ context.Context, commentID, status string) 
 		}
 	}
 	return ModerationComment{}, apperr.ErrNotFound
+}
+
+func (f *fakeModeration) BulkSetStatus(_ context.Context, commentIDs []string, status string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	affected := 0
+	for i := range f.items {
+		for _, id := range commentIDs {
+			if f.items[i].ID == id {
+				f.items[i].Status = status
+				affected++
+			}
+		}
+	}
+	return affected, nil
+}
+
+func (f *fakeModeration) BulkDelete(_ context.Context, commentIDs []string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.deleted = append(f.deleted, commentIDs...)
+	return len(commentIDs), nil
 }
 
 func (f *fakeModeration) Delete(_ context.Context, commentID string) error {
@@ -229,8 +278,8 @@ func (c *console) loginAs(t *testing.T, username, password string) {
 	if status != http.StatusSeeOther {
 		t.Fatalf("login POST = %d, want 303 (body: %s)", status, body)
 	}
-	if location != "/admin/comments" {
-		t.Errorf("login Location = %q, want /admin/comments", location)
+	if location != "/admin" {
+		t.Errorf("login Location = %q, want the dashboard", location)
 	}
 	if c.sessionToken(t) == "" {
 		t.Fatal("login did not set a session cookie")
@@ -366,7 +415,13 @@ func TestConsoleModerateComment(t *testing.T) {
 	if status != http.StatusSeeOther {
 		t.Fatalf("status = %d, want 303 (body: %s)", status, body)
 	}
-	if !strings.HasPrefix(location, "/admin/comments?status=pending") {
+	// The tab survives the redirect; url.Values sorts the parameters, so the
+	// check is on the parsed query rather than on the raw string.
+	parsed, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if got := parsed.Query().Get("status"); got != "pending" {
 		t.Errorf("Location = %q, want the pending tab", location)
 	}
 	if got := c.queue.statusOf("c-1"); got != "approved" {
@@ -420,128 +475,74 @@ func TestConsoleModerateWithoutCSRFIsRefused(t *testing.T) {
 	}
 }
 
-func TestConsoleAccountsPageAndCreate(t *testing.T) {
+func TestConsoleProfilePageAndSave(t *testing.T) {
 	t.Parallel()
 	c := newConsole(t)
 	c.login(t)
 
-	status, body := c.get(t, "/admin/accounts")
+	// The settings are a dialog on every page, not a page of their own.
+	status, body := c.get(t, "/admin")
 	if status != http.StatusOK {
-		t.Fatalf("accounts page = %d, want 200", status)
+		t.Fatalf("dashboard = %d, want 200", status)
 	}
-	if !strings.Contains(body, "owner") {
-		t.Error("accounts page does not list the signed-in account")
+	if !strings.Contains(body, `id="profile-dialog"`) {
+		t.Error("the dashboard does not carry the settings dialog")
+	}
+	if strings.Contains(body, "新建账号") {
+		t.Error("the console still offers to create accounts")
+	}
+	// The account's login name is not shown next to the avatar.
+	if strings.Contains(body, "@owner") {
+		t.Error("the avatar menu still shows the @username label")
 	}
 
-	status, location, body := c.post(t, "/admin/accounts", url.Values{
+	status, location, body := c.post(t, "/admin/profile", url.Values{
 		"csrf":        {c.csrf(t)},
-		"username":    {"grace"},
-		"displayName": {"Grace Hopper"},
-		"password":    {testPassword},
+		"displayName": {"Ada L."},
 	})
 	if status != http.StatusSeeOther {
-		t.Fatalf("create status = %d, want 303 (body: %s)", status, body)
+		t.Fatalf("profile save = %d, want 303 (body: %s)", status, body)
 	}
-	if location != "/admin/accounts?msg=created" {
-		t.Errorf("Location = %q, want the created notice", location)
+	if location != "/admin?msg=profile_saved" {
+		t.Errorf("Location = %q, want the dashboard with the saved notice", location)
 	}
 
 	accounts, _, err := c.env.svc.ListAccounts(t.Context(), AccountQuery{Limit: 10})
 	if err != nil {
 		t.Fatalf("ListAccounts() error = %v", err)
 	}
-	found := false
+	var updated *Account
 	for _, account := range accounts {
-		if account.Username == "grace" {
-			found = true
+		if account.Username == "owner" {
+			updated = account
 		}
 	}
-	if !found {
-		t.Error("the created account is not in the repository")
+	if updated == nil {
+		t.Fatal("owner account not found")
 	}
-	if events := c.env.trail.eventsByAction(actionAccountCreate); len(events) != 1 {
-		t.Errorf("account.create events = %d, want 1", len(events))
+	if updated.DisplayName != "Ada L." {
+		t.Errorf("display name = %q, want the saved value", updated.DisplayName)
+	}
+	if events := c.env.trail.eventsByAction(actionAccountUpdate); len(events) != 1 {
+		t.Errorf("account.update events = %d, want 1", len(events))
 	}
 }
 
-func TestConsoleAccountCreateReportsConflict(t *testing.T) {
+func TestConsoleLegacyAccountsPathRedirects(t *testing.T) {
 	t.Parallel()
 	c := newConsole(t)
 	c.login(t)
 
-	status, location, _ := c.post(t, "/admin/accounts", url.Values{
-		"csrf":     {c.csrf(t)},
-		"username": {"owner"},
-		"password": {testPassword},
-	})
-	if status != http.StatusSeeOther {
-		t.Fatalf("status = %d, want 303", status)
-	}
-	if !strings.Contains(location, "err=conflict_account") {
-		t.Errorf("Location = %q, want the conflict code", location)
-	}
-}
-
-func TestConsoleAuditPage(t *testing.T) {
-	t.Parallel()
-	c := newConsole(t)
-	c.login(t)
-
-	status, body := c.get(t, "/admin/audit")
-	if status != http.StatusOK {
-		t.Fatalf("audit page = %d, want 200", status)
-	}
-	if !strings.Contains(body, "auth.login") {
-		t.Error("audit page does not show the sign-in event")
-	}
-
-	status, body = c.get(t, "/admin/audit?action=account.bootstrap")
-	if status != http.StatusOK {
-		t.Fatalf("filtered audit page = %d, want 200", status)
-	}
-	if !strings.Contains(body, "account.bootstrap") {
-		t.Error("filtered audit page does not show the bootstrap event")
-	}
-}
-
-func TestConsoleLogout(t *testing.T) {
-	t.Parallel()
-	c := newConsole(t)
-	c.login(t)
-
-	status, location, _ := c.post(t, "/admin/logout", url.Values{"csrf": {c.csrf(t)}})
-	if status != http.StatusSeeOther {
-		t.Fatalf("logout status = %d, want 303", status)
-	}
-	if location != "/admin/login?msg=logged_out" {
-		t.Errorf("Location = %q, want the login page", location)
-	}
-	if c.sessionToken(t) != "" {
-		t.Error("logout left the session cookie in the jar")
-	}
-
-	status, body := c.get(t, "/admin/comments")
-	if status != http.StatusOK || !strings.Contains(body, "管理员登录") {
-		t.Error("a signed-out visitor can still reach the queue")
-	}
-}
-
-func TestConsoleUnknownPageIsProblemJSON(t *testing.T) {
-	t.Parallel()
-	c := newConsole(t)
-
-	// The console only claims /admin/*; anything else still goes through the
-	// API's fallback, which answers problem+json rather than HTML.
-	resp, err := c.client.Get(c.server.URL + "/admin/nope")
+	resp, err := c.noRedirectClient().Get(c.server.URL + "/admin/accounts")
 	if err != nil {
-		t.Fatalf("GET: %v", err)
+		t.Fatalf("GET /admin/accounts: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303", resp.StatusCode)
 	}
-	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/problem+json") {
-		t.Errorf("Content-Type = %q, want problem+json", ct)
+	if got := resp.Header.Get("Location"); got != "/admin" {
+		t.Errorf("Location = %q, want /admin", got)
 	}
 }
 
@@ -550,21 +551,7 @@ func TestConsoleSelfPasswordChangeSignsOut(t *testing.T) {
 	c := newConsole(t)
 	c.login(t)
 
-	accounts, _, err := c.env.svc.ListAccounts(t.Context(), AccountQuery{Limit: 10})
-	if err != nil {
-		t.Fatalf("ListAccounts() error = %v", err)
-	}
-	var self *Account
-	for _, account := range accounts {
-		if account.Username == "owner" {
-			self = account
-		}
-	}
-	if self == nil {
-		t.Fatal("owner account not found")
-	}
-
-	status, location, _ := c.post(t, "/admin/accounts/"+self.ID+"/password", url.Values{
+	status, location, _ := c.post(t, "/admin/profile/password", url.Values{
 		"csrf":            {c.csrf(t)},
 		"currentPassword": {testPassword},
 		"password":        {"another-long-password"},
@@ -585,18 +572,7 @@ func TestConsolePasswordChangeRequiresCurrentForSelf(t *testing.T) {
 	c := newConsole(t)
 	c.login(t)
 
-	accounts, _, err := c.env.svc.ListAccounts(t.Context(), AccountQuery{Limit: 10})
-	if err != nil {
-		t.Fatalf("ListAccounts() error = %v", err)
-	}
-	var self *Account
-	for _, account := range accounts {
-		if account.Username == "owner" {
-			self = account
-		}
-	}
-
-	status, location, _ := c.post(t, "/admin/accounts/"+self.ID+"/password", url.Values{
+	status, location, _ := c.post(t, "/admin/profile/password", url.Values{
 		"csrf":     {c.csrf(t)},
 		"password": {"another-long-password"},
 	})
@@ -642,7 +618,7 @@ func TestConsoleShowsInitialPasswordReminder(t *testing.T) {
 	c := newConsole(t)
 	c.login(t)
 
-	for _, path := range []string{"/admin/comments", "/admin/accounts", "/admin/audit"} {
+	for _, path := range []string{"/admin", "/admin/comments", "/admin/profile", "/admin/audit"} {
 		status, body := c.get(t, path)
 		if status != http.StatusOK {
 			t.Fatalf("%s = %d, want 200", path, status)
@@ -666,21 +642,7 @@ func TestConsoleReminderClearsAfterPasswordChange(t *testing.T) {
 	c := newConsole(t)
 	c.login(t)
 
-	accounts, _, err := c.env.svc.ListAccounts(t.Context(), AccountQuery{Limit: 10})
-	if err != nil {
-		t.Fatalf("ListAccounts() error = %v", err)
-	}
-	var self *Account
-	for _, account := range accounts {
-		if account.Username == "owner" {
-			self = account
-		}
-	}
-	if self == nil {
-		t.Fatal("owner account not found")
-	}
-
-	status, _, body := c.post(t, "/admin/accounts/"+self.ID+"/password", url.Values{
+	status, _, body := c.post(t, "/admin/profile/password", url.Values{
 		"csrf":            {c.csrf(t)},
 		"currentPassword": {testPassword},
 		"password":        {"another-long-password"},
@@ -1012,5 +974,198 @@ func TestConsoleLoginCredentialsRespectSnooze(t *testing.T) {
 	}
 	if strings.Contains(string(dismissed), "首次登录") {
 		t.Error("a differently worded nudge replaced the dismissed reminder")
+	}
+}
+
+func TestConsoleBulkModeration(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	status, location, body := c.post(t, "/admin/comments/bulk", url.Values{
+		"csrf":   {c.csrf(t)},
+		"return": {"pending"},
+		"action": {"approve"},
+		"ids":    {"c-1"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("bulk approve = %d, want 303 (body: %s)", status, body)
+	}
+	if !strings.Contains(location, "msg=bulk_done") {
+		t.Errorf("Location = %q, want the bulk confirmation", location)
+	}
+	if got := c.queue.statusOf("c-1"); got != "approved" {
+		t.Errorf("comment c-1 status = %q, want approved", got)
+	}
+
+	// The action is recorded once for the batch, with what was asked and what
+	// actually changed — an auditor needs both numbers.
+	events := c.env.trail.eventsByAction("comment.bulk.approve")
+	if len(events) != 1 {
+		t.Fatalf("bulk audit events = %d, want 1", len(events))
+	}
+	if got := fmt.Sprint(events[0].Detail["requested"]); got != "1" {
+		t.Errorf("detail.requested = %v, want 1", events[0].Detail["requested"])
+	}
+}
+
+func TestConsoleBulkRejectsEmptySelection(t *testing.T) {
+	t.Parallel()
+	c := newConsole(t)
+	c.login(t)
+
+	status, location, body := c.post(t, "/admin/comments/bulk", url.Values{
+		"csrf":   {c.csrf(t)},
+		"action": {"approve"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("bulk with no ids = %d, want 303 (body: %s)", status, body)
+	}
+	if !strings.Contains(location, "err=no_selection") {
+		t.Errorf("Location = %q, want the empty-selection code", location)
+	}
+	if got := c.queue.statusOf("c-1"); got != "pending" {
+		t.Errorf("comment c-1 status = %q, want it untouched", got)
+	}
+}
+
+// fakeMail is the mail subsystem as the console sees it, without SMTP.
+type fakeMail struct {
+	mu      sync.Mutex
+	enabled bool
+	sent    []string
+}
+
+func (f *fakeMail) Info() MailInfo {
+	return MailInfo{Enabled: f.enabled, Host: "smtp.example.com", Port: 587, TLS: "starttls",
+		From: "blog@example.com", Admin: "owner@example.com"}
+}
+
+func (f *fakeMail) SendTest(_ context.Context, to string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, to)
+	return nil
+}
+
+func (f *fakeMail) sentTo() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.sent))
+	copy(out, f.sent)
+	return out
+}
+
+func TestConsoleMailPageAndSwitches(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnv(t)
+	if _, err := env.svc.Bootstrap(t.Context(), "owner", "Owner", testPassword); err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	mailer := &fakeMail{enabled: true}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{
+			Auditor: env.trail,
+			Mail:    mailer,
+		})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	c := &console{
+		server: server,
+		client: &http.Client{Jar: jar, Timeout: 5 * time.Second},
+		jar:    jar,
+		env:    env,
+	}
+	c.login(t)
+
+	status, body := c.get(t, "/admin/mail")
+	if status != http.StatusOK {
+		t.Fatalf("mail page = %d, want 200", status)
+	}
+	if !strings.Contains(body, "通知开关") || !strings.Contains(body, "smtp.example.com") {
+		t.Error("the mail page does not show the switches and the SMTP configuration")
+	}
+	if !strings.Contains(body, "邮件管理") {
+		t.Error("the nav does not offer the mail page")
+	}
+
+	status, location, body := c.post(t, "/admin/mail", url.Values{
+		"csrf":        {c.csrf(t)},
+		"replyNotify": {"on"},
+	})
+	if status != http.StatusSeeOther {
+		t.Fatalf("mail save = %d, want 303 (body: %s)", status, body)
+	}
+	if location != "/admin/mail?msg=mail_saved" {
+		t.Errorf("Location = %q, want the saved notice", location)
+	}
+	prefs, err := env.svc.MailPreferences(t.Context())
+	if err != nil {
+		t.Fatalf("MailPreferences() error = %v", err)
+	}
+	if !prefs.ReplyNotify || prefs.AdminNotify {
+		t.Errorf("prefs = %+v, want only the reply switch on", prefs)
+	}
+	// Turning a switch on or off is a privileged action and is recorded.
+	if events := env.trail.eventsByAction("settings.mail"); len(events) != 1 {
+		t.Errorf("settings.mail events = %d, want 1", len(events))
+	}
+
+	status, location, _ = c.post(t, "/admin/mail/test", url.Values{
+		"csrf": {c.csrf(t)},
+		"to":   {"reader@example.com"},
+	})
+	if status != http.StatusSeeOther || !strings.Contains(location, "mail_test_sent") {
+		t.Errorf("test send = %d %q, want a redirect to the sent notice", status, location)
+	}
+	if got := mailer.sentTo(); len(got) != 1 || got[0] != "reader@example.com" {
+		t.Errorf("sent = %v, want one message to the requested address", got)
+	}
+}
+
+func TestConsoleMailPageWhenSMTPServerIsOff(t *testing.T) {
+	t.Parallel()
+
+	env := newTestEnv(t)
+	if _, err := env.svc.Bootstrap(t.Context(), "owner", "Owner", testPassword); err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	router := httpkit.NewRouter(discardLogger(), httpkit.RouterConfig{}, func(mux *http.ServeMux) {
+		RegisterWebUI(mux, discardLogger(), env.svc, WebUIConfig{
+			Auditor: env.trail,
+			Mail:    &fakeMail{},
+		})
+	})
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatalf("create cookie jar: %v", err)
+	}
+	c := &console{
+		server: server,
+		client: &http.Client{Jar: jar, Timeout: 5 * time.Second},
+		jar:    jar,
+		env:    env,
+	}
+	c.login(t)
+
+	status, body := c.get(t, "/admin/mail")
+	if status != http.StatusOK {
+		t.Fatalf("mail page = %d, want 200", status)
+	}
+	if !strings.Contains(body, "SMTP 未配置") {
+		t.Error("the page does not say that SMTP is off")
+	}
+	if strings.Contains(body, `type="submit" >发送测试`) {
+		t.Error("the test button is enabled without an SMTP server")
 	}
 }

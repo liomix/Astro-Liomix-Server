@@ -10,22 +10,22 @@
 <script src="/admin/assets/theme.js?v={{.AssetVersion}}"></script>
 <script src="/admin/assets/app.js?v={{.AssetVersion}}" defer></script>
 </head>
-<body class="{{if .Account}}bg-body-tertiary{{else}}auth{{end}}">
+<body class="{{if .Account}}app-body{{else}}auth{{end}}">
 <a class="visually-hidden-focusable position-absolute top-0 start-0 p-2 bg-body" href="#main">跳到主要内容</a>
 <div class="console-toasts" id="toasts" aria-live="polite">
   {{if .Account}}{{if .Account.PasswordInitial}}
-  <div class="console-toast warn" role="status" data-snooze="10">
+  <div class="console-toast warn" role="status" data-snooze="10" data-timeout="12000">
     <span class="toast-icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>仍在使用初始密码</strong>
       账号 <span class="mono">{{.Account.Username}}</span> 的密码是创建时生成的，请改成只有你知道的密码。
     </div>
-    <a class="toast-action" href="/admin/accounts">去修改</a>
+    <a class="toast-action" href="/admin/profile">去修改</a>
     <button class="toast-close" type="button" data-dismiss aria-label="关闭">×</button>
   </div>
   {{end}}{{end}}
   {{if .InitialUsername}}
-  <div class="console-toast warn" role="status" data-snooze="10">
+  <div class="console-toast warn" role="status" data-snooze="10" data-timeout="12000">
     <span class="toast-icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>仍在使用初始密码</strong>
@@ -36,7 +36,7 @@
   </div>
   {{end}}
   {{if .LoginTip}}
-  <div class="console-toast info" role="status">
+  <div class="console-toast info" role="status" data-timeout="8000">
     <span class="toast-icon">{{template "iconKey"}}</span>
     <div class="grow">
       <strong>首次登录？</strong>
@@ -46,7 +46,7 @@
   </div>
   {{end}}
   {{if .NoAccounts}}
-  <div class="console-toast warn" role="status">
+  <div class="console-toast warn" role="status" data-timeout="10000">
     <span class="toast-icon">{{template "iconAlert"}}</span>
     <div class="grow">
       <strong>还没有管理员账号</strong>
@@ -71,32 +71,72 @@
   {{end}}
 </div>
 {{if .Account}}
-<nav class="navbar navbar-expand bg-body border-bottom sticky-top">
-  <div class="container-xl flex-nowrap">
-    <a class="navbar-brand d-flex align-items-center gap-2 me-3" href="/admin/comments">
+<nav class="app-nav sticky-top">
+  <div class="container-xl app-nav-inner">
+    <a class="app-brand" href="/admin">
       <span class="brand-mark">{{template "iconShield"}}</span>
-      <span class="fw-semibold">管理后台</span>
+      <span class="app-brand-text">管理后台</span>
     </a>
-    <ul class="navbar-nav app-nav flex-row gap-1 me-auto">
+    <ul class="nav app-tabs">
+      <li class="nav-item"><a class="nav-link {{if eq .Nav "home"}}active{{end}}" {{if eq .Nav "home"}}aria-current="page"{{end}} href="/admin">首页</a></li>
       {{if .HasModeration}}
-      <li class="nav-item"><a class="nav-link {{if eq .Nav "comments"}}active{{end}}" {{if eq .Nav "comments"}}aria-current="page"{{end}} href="/admin/comments">评论</a></li>
+      <li class="nav-item"><a class="nav-link {{if eq .Nav "comments"}}active{{end}}" {{if eq .Nav "comments"}}aria-current="page"{{end}} href="/admin/comments">评论管理</a></li>
       {{end}}
-      <li class="nav-item"><a class="nav-link {{if eq .Nav "accounts"}}active{{end}}" {{if eq .Nav "accounts"}}aria-current="page"{{end}} href="/admin/accounts">账号</a></li>
-      <li class="nav-item"><a class="nav-link {{if eq .Nav "audit"}}active{{end}}" {{if eq .Nav "audit"}}aria-current="page"{{end}} href="/admin/audit">审计</a></li>
+      {{if .HasMail}}
+      <li class="nav-item"><a class="nav-link {{if eq .Nav "mail"}}active{{end}}" {{if eq .Nav "mail"}}aria-current="page"{{end}} href="/admin/mail">邮件管理</a></li>
+      {{end}}
     </ul>
-    <div class="d-flex align-items-center gap-2">
-      <span class="avatar" aria-hidden="true">{{firstRune .Account.DisplayName}}</span>
-      <span class="small text-secondary d-none d-sm-inline">{{.Account.DisplayName}}</span>
-      <form method="post" action="/admin/logout" class="m-0">
-        <input type="hidden" name="csrf" value="{{.CSRFToken}}">
-        <button class="btn btn-sm btn-outline-secondary" type="submit" aria-label="退出登录">
-          {{template "iconLogout"}}<span class="d-none d-sm-inline">退出</span>
-        </button>
-      </form>
-    </div>
+    <details class="avatar-menu ms-auto">
+      <summary class="avatar-summary" aria-label="账号与设置">
+        <span class="avatar" aria-hidden="true">{{firstRune .Account.DisplayName}}</span>
+      </summary>
+      <div class="avatar-panel">
+        <div class="avatar-panel-head">
+          <div class="fw-semibold small">{{.Account.DisplayName}}</div>
+        </div>
+        <button class="avatar-item" type="button" data-dialog-open="profile-dialog">账号设置</button>
+        <form method="post" action="/admin/logout" class="m-0">
+          <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+          <button class="avatar-item" type="submit">退出登录</button>
+        </form>
+      </div>
+    </details>
   </div>
 </nav>
 {{end}}
+{{if .Account}}
+<dialog class="app-dialog" id="profile-dialog" aria-labelledby="profile-dialog-title">
+  <div class="app-dialog-head">
+    <h2 class="panel-title" id="profile-dialog-title">账号设置</h2>
+    <button class="dialog-close" type="button" data-dialog-close aria-label="关闭">×</button>
+  </div>
+  <div class="app-dialog-body">
+    <form method="post" action="/admin/profile">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <label class="form-label small fw-semibold" for="dialog-display-name">显示名</label>
+      <div class="d-flex gap-2">
+        <input class="form-control" id="dialog-display-name" name="displayName" value="{{.Account.DisplayName}}" maxlength="80" required>
+        <button class="btn btn-primary flex-shrink-0" type="submit">保存</button>
+      </div>
+    </form>
+    <div class="dialog-divider"></div>
+    <form method="post" action="/admin/profile/password">
+      <input type="hidden" name="csrf" value="{{.CSRFToken}}">
+      <label class="form-label small fw-semibold" for="dialog-current-password">当前密码</label>
+      <input class="form-control mb-2" id="dialog-current-password" type="password" name="currentPassword"
+             autocomplete="current-password" required>
+      <label class="form-label small fw-semibold" for="dialog-new-password">新密码</label>
+      <div class="d-flex gap-2">
+        <input class="form-control" id="dialog-new-password" type="password" name="password"
+               autocomplete="new-password" required placeholder="至少 12 位">
+        <button class="btn btn-danger flex-shrink-0" type="submit">修改</button>
+      </div>
+      <div class="form-text">修改后所有设备都需要用新密码重新登录。</div>
+    </form>
+  </div>
+</dialog>
+{{end}}
+
 <main id="main" {{if .Account}}class="container-xl py-4"{{end}}>
   {{template "content" .}}
 </main>
@@ -112,3 +152,7 @@
 {{define "iconInbox"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4z"/><path d="M4 13h5l1.5 2h3L15 13h5"/></svg>{{end}}
 {{define "iconLogout"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 4h4v16h-4"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h9"/></svg>{{end}}
 {{define "iconSearch"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg>{{end}}
+{{define "iconClock"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M12 8v4.5l3 1.8"/></svg>{{end}}
+{{define "iconChat"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v11H9l-5 4V5z"/></svg>{{end}}
+{{define "iconShieldX"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z"/><path d="M9.5 9.5l5 5"/><path d="M14.5 9.5l-5 5"/></svg>{{end}}
+{{define "iconUser"}}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c1.5-3.5 4-5 7-5s5.5 1.5 7 5"/></svg>{{end}}

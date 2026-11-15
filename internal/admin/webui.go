@@ -14,8 +14,10 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/liomix/astro-liomix-server/internal/platform/apperr"
 	"github.com/liomix/astro-liomix-server/internal/platform/audit"
@@ -64,6 +66,10 @@ const (
 	// webUIPageSize is how many rows one page shows. The API still pages with a
 	// cursor; the console just makes the next link available.
 	webUIPageSize = 50
+	// maxSearchKeyword bounds the moderation search box, matching the comment
+	// module's own limit. The console truncates; the module refuses. Two layers
+	// because the URL is user-editable and the handler must not trust it.
+	maxSearchKeyword = 100
 )
 
 // moderationStatuses is the comment states the console can list and set. It
@@ -95,6 +101,9 @@ type WebUIConfig struct {
 	// the seeded default administrator keeps appearing after more accounts are
 	// added. Empty falls back to "only if exactly one account qualifies".
 	PreferredInitialUsername string
+	// Mail powers the mail page. When nil the nav item is hidden and the route
+	// answers 404, which is what a build without the mail package should do.
+	Mail MailService
 }
 
 // pageData is the view model every page shares. One struct rather than one per
@@ -111,6 +120,14 @@ type pageData struct {
 	Error     string
 	// HasModeration hides the comment tab when no queue is wired.
 	HasModeration bool
+	// HasMail shows the mail tab. It follows whether the console was given a
+	// mail service, not whether SMTP is configured: an operator still needs
+	// the page to see that it is off.
+	HasMail bool
+	// Mail is the configuration snapshot shown on the mail page.
+	Mail MailInfo
+	// MailPrefs are the two notification switches.
+	MailPrefs MailPreferences
 	// NoAccounts is set on the login page when the account table is empty. A
 	// form that always answers "wrong password" would send a new operator
 	// looking for a typo instead of telling them to create the account.
@@ -128,15 +145,34 @@ type pageData struct {
 	// AssetVersion busts the asset URL when the embedded CSS or JS changes.
 	AssetVersion string
 
+	// Greeting is the time-of-day line on the dashboard ("早上好").
+	Greeting string
+	// Date is the dashboard's calendar line, in the server's local zone.
+	Date string
+	// Today is how many comments arrived since midnight, in any state.
+	Today int
+	// Recent is the newest handful of pending comments, for the dashboard.
+	Recent []ModerationComment
+
 	Statuses   []string
 	Status     string
 	Comments   []ModerationComment
 	NextCursor string
+	// Keyword is the search the operator typed, echoed back into the form so
+	// the box keeps its value and every action link can carry it forward.
+	Keyword string
+	// Counts is how many comments each state holds under the current keyword
+	// filter. Nil when the count query failed; the template then shows tabs
+	// without numbers rather than numbers that lie.
+	Counts map[string]int
 
 	Accounts []*Account
 
 	Entries []*audit.Entry
 	Action  string
+	// Session is the console session behind the current request, shown on the
+	// profile page so the operator can see when it expires.
+	Session *Session
 }
 
 // webUI serves the operator console.
@@ -148,6 +184,7 @@ type webUI struct {
 	secureCookies            bool
 	showInitialCredentials   bool
 	preferredInitialUsername string
+	mail                     MailService
 }
 
 // RegisterWebUI mounts the console on mux under /admin.
@@ -168,6 +205,7 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 		secureCookies:            cfg.SecureCookies,
 		showInitialCredentials:   cfg.ShowInitialCredentials,
 		preferredInitialUsername: cfg.PreferredInitialUsername,
+		mail:                     cfg.Mail,
 	}
 
 	mux.HandleFunc("GET /admin/assets/bootstrap.min.css", u.asset(bootstrapCSS, "text/css; charset=utf-8"))
@@ -181,33 +219,95 @@ func RegisterWebUI(mux *http.ServeMux, logger *slog.Logger, svc *Service, cfg We
 	mux.HandleFunc("POST /admin/login", u.loginSubmit)
 	mux.HandleFunc("POST /admin/logout", u.withSession(u.logout))
 
-	mux.HandleFunc("GET /admin/accounts", u.withSession(u.accountsPage))
-	mux.HandleFunc("POST /admin/accounts", u.withSession(u.accountCreate))
-	mux.HandleFunc("POST /admin/accounts/{id}/status", u.withSession(u.accountStatus))
-	mux.HandleFunc("POST /admin/accounts/{id}/password", u.withSession(u.accountPassword))
-	mux.HandleFunc("POST /admin/accounts/{id}/delete", u.withSession(u.accountDelete))
+	// The console manages exactly one account: the one signed in. Creating,
+	// disabling and deleting administrators is still available over the JSON
+	// API, but it is not a page — a blog with one operator does not need a user
+	// management screen, and pretending otherwise invites mistakes.
+	// The settings live in a dialog on every page, so there is no page of their
+	// own; the two forms behind it still post here.
+	mux.HandleFunc("POST /admin/profile", u.withSession(u.profileSave))
+	mux.HandleFunc("POST /admin/profile/password", u.withSession(u.profilePassword))
+	// Old links and bookmarks pointed here.
+	mux.HandleFunc("GET /admin/accounts", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	})
+	mux.HandleFunc("GET /admin/profile", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin", http.StatusSeeOther)
+	})
 
 	mux.HandleFunc("GET /admin/audit", u.withSession(u.auditPage))
+	if cfg.Mail != nil {
+		mux.HandleFunc("GET /admin/mail", u.withSession(u.mailPage))
+		mux.HandleFunc("POST /admin/mail", u.withSession(u.mailSave))
+		mux.HandleFunc("POST /admin/mail/test", u.withSession(u.mailTest))
+	}
 
 	if cfg.Moderation != nil {
 		mux.HandleFunc("GET /admin/comments", u.withSession(u.commentsPage))
 		mux.HandleFunc("POST /admin/comments/{id}/status", u.withSession(u.commentStatus))
 		mux.HandleFunc("POST /admin/comments/{id}/delete", u.withSession(u.commentDelete))
+		mux.HandleFunc("POST /admin/comments/bulk", u.withSession(u.commentsBulk))
 	}
 }
 
-// root sends a visitor to the queue when signed in and to the form otherwise.
+// root renders the dashboard, or the login form for a visitor.
 func (u *webUI) root(w http.ResponseWriter, r *http.Request) {
-	if _, _, err := u.currentSession(r); err != nil {
+	account, session, err := u.currentSession(r)
+	if err != nil {
 		u.redirect(w, r, "/admin/login")
 		return
 	}
-	if u.moderation == nil {
-		// A build without a comment module still has accounts and the trail.
-		u.redirect(w, r, "/admin/accounts")
-		return
+	if u.snoozed(r) {
+		account = account.Clone()
+		account.PasswordInitial = false
 	}
-	u.redirect(w, r, "/admin/comments")
+	u.dashboard(w, r, &Principal{Account: account, Session: session})
+}
+
+// dashboard is the landing page: what arrived, what is waiting, and what the
+// operator last did. It deliberately has no charts — four numbers and two lists
+// answer the questions a blog owner actually has.
+func (u *webUI) dashboard(w http.ResponseWriter, r *http.Request, p *Principal) {
+	now := time.Now()
+	data := pageData{
+		Title: "首页", Nav: "home", Account: p.Account,
+		CSRFToken: u.csrfToken(w, r),
+		Greeting:  greeting(now),
+		Date:      dateLine(now),
+	}
+	data.Flash, data.Error = u.notices(r)
+
+	if u.moderation != nil {
+		counts, err := u.moderation.Counts(r.Context(), ModerationQuery{})
+		if err != nil {
+			u.logger.WarnContext(r.Context(), "dashboard counts", slog.Any("error", err))
+		}
+		data.Counts = counts
+
+		startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		if today, err := u.moderation.CountSince(r.Context(), startOfDay); err != nil {
+			u.logger.WarnContext(r.Context(), "dashboard today count", slog.Any("error", err))
+		} else {
+			data.Today = today
+		}
+
+		page, err := u.moderation.List(r.Context(), ModerationQuery{Status: "pending", Limit: 5})
+		if err != nil {
+			u.logger.WarnContext(r.Context(), "dashboard pending list", slog.Any("error", err))
+		} else {
+			data.Recent = page.Items
+		}
+	}
+
+	// Only sign-ins: the dashboard feed answers "who used this console", while
+	// the audit page keeps the full record of moderation.
+	if entries, _, err := u.svc.ListAuditLogs(r.Context(), audit.Query{Limit: 8, Action: actionLogin}); err != nil {
+		u.logger.WarnContext(r.Context(), "dashboard audit feed", slog.Any("error", err))
+	} else {
+		data.Entries = entries
+	}
+
+	u.render(w, http.StatusOK, "dashboard", data)
 }
 
 // currentSession resolves the session cookie without writing a response.
@@ -247,7 +347,7 @@ func (u *webUI) withSession(next func(http.ResponseWriter, *http.Request, *Princ
 // they were going.
 func (u *webUI) loginPage(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := u.currentSession(r); err == nil {
-		u.redirect(w, r, "/admin/comments")
+		u.redirect(w, r, "/admin")
 		return
 	}
 	u.render(w, http.StatusOK, "login", u.loginData(w, r))
@@ -322,7 +422,7 @@ func (u *webUI) loginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.setSessionCookie(w, token, session.ExpiresAt)
-	u.redirect(w, r, "/admin/comments")
+	u.redirect(w, r, "/admin")
 }
 
 // renderLoginError re-renders the form with a message; the status is the one the
@@ -370,19 +470,38 @@ func (u *webUI) commentsPage(w http.ResponseWriter, r *http.Request, p *Principa
 		return
 	}
 
+	// A search is a person typing into a box, so an over-long value is cut
+	// rather than refused: losing the tail of a paste is a smaller surprise
+	// than an error page. The comment module bounds it again on its side.
+	keyword := strings.TrimSpace(r.URL.Query().Get("q"))
+	if utf8.RuneCountInString(keyword) > maxSearchKeyword {
+		keyword = string([]rune(keyword)[:maxSearchKeyword])
+	}
+
 	page, err := u.moderation.List(r.Context(), ModerationQuery{
-		Status: status,
-		Limit:  webUIPageSize,
-		Cursor: strings.TrimSpace(r.URL.Query().Get("cursor")),
+		Status:  status,
+		Keyword: keyword,
+		Limit:   webUIPageSize,
+		Cursor:  strings.TrimSpace(r.URL.Query().Get("cursor")),
 	})
 	if err != nil {
 		u.logger.ErrorContext(r.Context(), "console list comments", slog.Any("error", err))
 		u.render(w, http.StatusInternalServerError, "comments", pageData{
 			Title: "评论审核", Nav: "comments", Account: p.Account,
 			CSRFToken: u.csrfToken(w, r), Statuses: moderationStatuses, Status: status,
-			Error: "读取评论失败，请查看服务日志。",
+			Keyword: keyword,
+			Error:   "读取评论失败，请查看服务日志。",
 		})
 		return
+	}
+
+	// The counts describe the same filter as the rows above them. A failure
+	// here is not worth failing the page for: the queue still works without
+	// the numbers.
+	counts, err := u.moderation.Counts(r.Context(), ModerationQuery{Keyword: keyword})
+	if err != nil {
+		u.logger.WarnContext(r.Context(), "console count comments", slog.Any("error", err))
+		counts = nil
 	}
 
 	flash, errText := u.notices(r)
@@ -392,6 +511,7 @@ func (u *webUI) commentsPage(w http.ResponseWriter, r *http.Request, p *Principa
 		Flash:     flash, Error: errText,
 		Statuses: moderationStatuses, Status: status,
 		Comments: page.Items, NextCursor: page.NextCursor,
+		Keyword: keyword, Counts: counts,
 	})
 }
 
@@ -403,21 +523,22 @@ func (u *webUI) commentStatus(w http.ResponseWriter, r *http.Request, p *Princip
 	}
 	status := r.PostFormValue("status")
 	filter := u.returnFilter(r)
+	keyword := u.returnKeyword(r)
 	if !validModerationStatus(status) {
-		u.redirect(w, r, "/admin/comments?status="+filter+"&err=bad_request")
+		u.redirect(w, r, commentsPath(filter, keyword, "err", "bad_request"))
 		return
 	}
 
 	comment, err := u.moderation.SetStatus(r.Context(), r.PathValue("id"), status)
 	if err != nil {
-		u.redirect(w, r, "/admin/comments?status="+filter+"&err="+u.moderationErrorCode(err))
+		u.redirect(w, r, commentsPath(filter, keyword, "err", u.moderationErrorCode(err)))
 		return
 	}
 	u.record(r, p, "comment.moderate", "comment", comment.ID, map[string]any{
 		"postSlug": comment.PostSlug,
 		"status":   comment.Status,
 	})
-	u.redirect(w, r, "/admin/comments?status="+filter+"&msg=moderated")
+	u.redirect(w, r, commentsPath(filter, keyword, "msg", "moderated"))
 }
 
 // commentDelete removes a comment and its replies.
@@ -427,106 +548,157 @@ func (u *webUI) commentDelete(w http.ResponseWriter, r *http.Request, p *Princip
 		return
 	}
 	filter := u.returnFilter(r)
+	keyword := u.returnKeyword(r)
 	id := r.PathValue("id")
 	if err := u.moderation.Delete(r.Context(), id); err != nil {
-		u.redirect(w, r, "/admin/comments?status="+filter+"&err="+u.moderationErrorCode(err))
+		u.redirect(w, r, commentsPath(filter, keyword, "err", u.moderationErrorCode(err)))
 		return
 	}
 	u.record(r, p, "comment.delete", "comment", id, nil)
-	u.redirect(w, r, "/admin/comments?status="+filter+"&msg=deleted")
+	u.redirect(w, r, commentsPath(filter, keyword, "msg", "deleted"))
 }
 
-// accountsPage lists accounts and the creation form.
-func (u *webUI) accountsPage(w http.ResponseWriter, r *http.Request, p *Principal) {
-	accounts, _, err := u.svc.ListAccounts(r.Context(), AccountQuery{Limit: maxAccountPageSize})
-	if err != nil {
-		u.logger.ErrorContext(r.Context(), "console list accounts", slog.Any("error", err))
-		accounts = nil
+// commentsBulk applies one moderation decision to every selected comment.
+//
+// One endpoint rather than one per action: the decision is a parameter, so the
+// audit detail and the redirect are written once instead of four times.
+func (u *webUI) commentsBulk(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !u.parseForm(w, r) || !u.csrfOK(r) {
+		u.redirect(w, r, "/admin/comments?err=csrf")
+		return
 	}
-	flash, errText := u.notices(r)
-	u.render(w, http.StatusOK, "accounts", pageData{
-		Title: "账号", Nav: "accounts", Account: p.Account,
-		CSRFToken: u.csrfToken(w, r),
-		Flash:     flash, Error: errText,
-		Accounts: accounts,
+	filter := u.returnFilter(r)
+	keyword := u.returnKeyword(r)
+	ids := r.PostForm["ids"]
+	if len(ids) == 0 {
+		u.redirect(w, r, commentsPath(filter, keyword, "err", "no_selection"))
+		return
+	}
+
+	action := strings.TrimSpace(r.PostFormValue("action"))
+	var (
+		affected int
+		err      error
+	)
+	switch action {
+	case "approve", "reject", "spam":
+		status := map[string]string{"approve": "approved", "reject": "rejected", "spam": "spam"}[action]
+		affected, err = u.moderation.BulkSetStatus(r.Context(), ids, status)
+	case "delete":
+		affected, err = u.moderation.BulkDelete(r.Context(), ids)
+	default:
+		u.redirect(w, r, commentsPath(filter, keyword, "err", "bad_request"))
+		return
+	}
+	if err != nil {
+		u.redirect(w, r, commentsPath(filter, keyword, "err", u.moderationErrorCode(err)))
+		return
+	}
+
+	u.record(r, p, "comment.bulk."+action, "comment", "", map[string]any{
+		"requested": len(ids),
+		"affected":  affected,
 	})
+	u.redirect(w, r, commentsPath(filter, keyword, "msg", "bulk_done"))
 }
 
-// accountCreate adds an operator. The service records the audit event.
-func (u *webUI) accountCreate(w http.ResponseWriter, r *http.Request, p *Principal) {
+// profileSave updates the display name, the only account field that is editable
+// without touching a credential.
+func (u *webUI) profileSave(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !u.parseForm(w, r) || !u.csrfOK(r) {
-		u.redirect(w, r, "/admin/accounts?err=csrf")
+		u.redirect(w, r, "/admin?err=csrf")
 		return
 	}
-	_, err := u.svc.CreateAccount(r.Context(), CreateAccountInput{
-		Username:    r.PostFormValue("username"),
-		DisplayName: r.PostFormValue("displayName"),
-		Password:    r.PostFormValue("password"),
-	}, u.actor(r, p))
-	if err != nil {
-		u.redirect(w, r, "/admin/accounts?err="+u.accountErrorCode(err))
+	displayName := strings.TrimSpace(r.PostFormValue("displayName"))
+	if _, err := u.svc.UpdateAccount(r.Context(), p.Account.ID, UpdateAccountInput{
+		DisplayName: &displayName,
+	}, u.actor(r, p)); err != nil {
+		u.redirect(w, r, "/admin?err="+u.accountErrorCode(err))
 		return
 	}
-	u.redirect(w, r, "/admin/accounts?msg=created")
+	u.redirect(w, r, "/admin?msg=profile_saved")
 }
 
-// accountStatus enables or disables an account.
-func (u *webUI) accountStatus(w http.ResponseWriter, r *http.Request, p *Principal) {
+// profilePassword changes the signed-in account's password and signs it out.
+func (u *webUI) profilePassword(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !u.parseForm(w, r) || !u.csrfOK(r) {
-		u.redirect(w, r, "/admin/accounts?err=csrf")
+		u.redirect(w, r, "/admin?err=csrf")
 		return
 	}
-	status := AccountStatus(strings.TrimSpace(r.PostFormValue("status")))
-	if !status.Valid() {
-		u.redirect(w, r, "/admin/accounts?err=bad_request")
-		return
-	}
-	_, err := u.svc.UpdateAccount(r.Context(), r.PathValue("id"), UpdateAccountInput{Status: &status}, u.actor(r, p))
-	if err != nil {
-		u.redirect(w, r, "/admin/accounts?err="+u.accountErrorCode(err))
-		return
-	}
-	u.redirect(w, r, "/admin/accounts?msg=updated")
-}
-
-// accountPassword resets a password. The service decides whether a current
-// password is required; the form always offers the field.
-func (u *webUI) accountPassword(w http.ResponseWriter, r *http.Request, p *Principal) {
-	if !u.parseForm(w, r) || !u.csrfOK(r) {
-		u.redirect(w, r, "/admin/accounts?err=csrf")
-		return
-	}
-	target := r.PathValue("id")
-	err := u.svc.ChangePassword(r.Context(), target, ChangePasswordInput{
+	err := u.svc.ChangePassword(r.Context(), p.Account.ID, ChangePasswordInput{
 		CurrentPassword: r.PostFormValue("currentPassword"),
 		NewPassword:     r.PostFormValue("password"),
 	}, u.actor(r, p))
 	if err != nil {
-		u.redirect(w, r, "/admin/accounts?err="+u.accountErrorCode(err))
+		u.redirect(w, r, "/admin?err="+u.accountErrorCode(err))
 		return
 	}
-	if target == p.Account.ID {
-		// The change revoked every session of the account, including this one.
-		u.clearSessionCookie(w)
-		u.redirect(w, r, "/admin/login?msg=password_changed")
-		return
-	}
-	u.redirect(w, r, "/admin/accounts?msg=password_changed")
+	// The change revoked every session of the account, including this one.
+	u.clearSessionCookie(w)
+	u.redirect(w, r, "/admin/login?msg=password_changed")
 }
 
-// accountDelete removes an account and its sessions.
-func (u *webUI) accountDelete(w http.ResponseWriter, r *http.Request, p *Principal) {
+// mailPage shows the outbound mail configuration and the two switches the
+// console owns.
+func (u *webUI) mailPage(w http.ResponseWriter, r *http.Request, p *Principal) {
+	info := u.mail.Info()
+	prefs, err := u.svc.MailPreferences(r.Context())
+	if err != nil {
+		u.logger.WarnContext(r.Context(), "read mail preferences", slog.Any("error", err))
+	}
+	flash, errText := u.notices(r)
+	u.render(w, http.StatusOK, "mail", pageData{
+		Title: "邮件管理", Nav: "mail", Account: p.Account,
+		CSRFToken: u.csrfToken(w, r),
+		Flash:     flash, Error: errText,
+		Mail: info, MailPrefs: prefs,
+	})
+}
+
+// mailSave stores the notification switches.
+func (u *webUI) mailSave(w http.ResponseWriter, r *http.Request, p *Principal) {
 	if !u.parseForm(w, r) || !u.csrfOK(r) {
-		u.redirect(w, r, "/admin/accounts?err=csrf")
+		u.redirect(w, r, "/admin/mail?err=csrf")
 		return
 	}
-	if err := u.svc.DeleteAccount(r.Context(), r.PathValue("id"), u.actor(r, p)); err != nil {
-		u.redirect(w, r, "/admin/accounts?err="+u.accountErrorCode(err))
+	prefs := MailPreferences{
+		ReplyNotify: r.PostFormValue("replyNotify") != "",
+		AdminNotify: r.PostFormValue("adminNotify") != "",
+	}
+	if err := u.svc.SetMailPreferences(r.Context(), prefs, u.actor(r, p)); err != nil {
+		u.redirect(w, r, "/admin/mail?err=error")
 		return
 	}
-	u.redirect(w, r, "/admin/accounts?msg=deleted")
+	u.redirect(w, r, "/admin/mail?msg=mail_saved")
 }
 
+// mailTest sends one message so the SMTP settings can be checked on demand.
+func (u *webUI) mailTest(w http.ResponseWriter, r *http.Request, p *Principal) {
+	if !u.parseForm(w, r) || !u.csrfOK(r) {
+		u.redirect(w, r, "/admin/mail?err=csrf")
+		return
+	}
+	if !u.mail.Info().Enabled {
+		u.redirect(w, r, "/admin/mail?err=mail_disabled")
+		return
+	}
+	to := strings.TrimSpace(r.PostFormValue("to"))
+	if to == "" {
+		to = u.mail.Info().Admin
+	}
+	if to == "" {
+		u.redirect(w, r, "/admin/mail?err=bad_request")
+		return
+	}
+	if err := u.mail.SendTest(r.Context(), to); err != nil {
+		u.logger.WarnContext(r.Context(), "send test mail", slog.Any("error", err))
+		u.redirect(w, r, "/admin/mail?err=error")
+		return
+	}
+	u.redirect(w, r, "/admin/mail?msg=mail_test_sent")
+}
+
+// auditPage reads the trail, newest first.
 // auditPage reads the trail, newest first.
 func (u *webUI) auditPage(w http.ResponseWriter, r *http.Request, p *Principal) {
 	action := strings.TrimSpace(r.URL.Query().Get("action"))
@@ -569,6 +741,7 @@ func (u *webUI) auditPage(w http.ResponseWriter, r *http.Request, p *Principal) 
 // only honest answer to "the page failed to render" is a 500.
 func (u *webUI) render(w http.ResponseWriter, status int, page string, data pageData) {
 	data.HasModeration = u.moderation != nil
+	data.HasMail = u.mail != nil
 	data.AssetVersion = consoleAssetVersion
 
 	tmpl, ok := uiPages[page]
@@ -771,6 +944,33 @@ func (u *webUI) returnFilter(r *http.Request) string {
 	return "pending"
 }
 
+// returnKeyword reads the search the operator was running, so a decision sends
+// them back to the same result set instead of the unfiltered queue.
+func (u *webUI) returnKeyword(r *http.Request) string {
+	keyword := strings.TrimSpace(r.PostFormValue("q"))
+	if runes := []rune(keyword); len(runes) > maxSearchKeyword {
+		return string(runes[:maxSearchKeyword])
+	}
+	return keyword
+}
+
+// commentsPath builds a queue URL that preserves the tab and the search.
+//
+// Values are escaped by url.Values rather than concatenated: a keyword with an
+// ampersand in it would otherwise split into two parameters and drop the rest
+// of the search on the way back.
+func commentsPath(status, keyword, key, value string) string {
+	query := url.Values{}
+	query.Set("status", status)
+	if keyword != "" {
+		query.Set("q", keyword)
+	}
+	if key != "" && value != "" {
+		query.Set(key, value)
+	}
+	return "/admin/comments?" + query.Encode()
+}
+
 // moderationErrorCode maps a queue failure to a query code the page can explain.
 func (u *webUI) moderationErrorCode(err error) string {
 	switch {
@@ -822,6 +1022,12 @@ var flashMessages = map[string]string{
 	"updated":          "已更新。",
 	"password_changed": "密码已更新；该账号的会话已全部撤销。",
 	"logged_out":       "已退出登录。",
+	"bulk_done":        "已对选中的条目执行批量操作。",
+	"profile_saved":    "已保存账号资料。",
+	"mail_saved":       "已保存邮件设置。",
+	"mail_test_sent":   "测试邮件已交给发送队列。",
+	"mail_disabled":    "服务器未启用邮件（MAIL_ENABLED=false），无法发送。",
+	"bulk_partial":     "批量操作已执行，但有部分条目因保护规则被跳过。",
 }
 
 var errorMessages = map[string]string{
@@ -832,6 +1038,7 @@ var errorMessages = map[string]string{
 	"invalid_account":  "输入不合法：用户名 3–40 位小写字母、数字、. _ -；密码至少 12 位，且不能与用户名相同。",
 	"invalid_password": "密码不合法：至少 12 位，不能与用户名或当前密码相同。",
 	"bad_current":      "当前密码不正确。",
+	"no_selection":     "没有选中任何条目。",
 	"error":            "操作失败，请查看服务日志。",
 }
 
@@ -844,6 +1051,55 @@ func validModerationStatus(s string) bool {
 		}
 	}
 	return false
+}
+
+// greeting returns the part of the day the operator is in, by the server's
+// clock. It is a courtesy line, not a fact about the reader: a dashboard that
+// guessed the visitor's timezone would need the reader's clock to be right.
+func greeting(now time.Time) string {
+	switch hour := now.Hour(); {
+	case hour < 5:
+		return "夜深了"
+	case hour < 11:
+		return "早上好"
+	case hour < 14:
+		return "中午好"
+	case hour < 18:
+		return "下午好"
+	default:
+		return "晚上好"
+	}
+}
+
+// dateLine is the dashboard's calendar line: "2026年11月15日 周日".
+func dateLine(now time.Time) string {
+	weekdays := [...]string{"周日", "周一", "周二", "周三", "周四", "周五", "周六"}
+	return fmt.Sprintf("%d年%d月%d日 %s", now.Year(), int(now.Month()), now.Day(), weekdays[int(now.Weekday())])
+}
+
+// actionLabel turns a dotted audit action into something a person reads.
+func actionLabel(action string) string {
+	if label, ok := actionLabels[action]; ok {
+		return label
+	}
+	return action
+}
+
+var actionLabels = map[string]string{
+	"auth.login":              "登录",
+	"auth.logout":             "退出登录",
+	"account.create":          "创建账号",
+	"account.update":          "更新账号",
+	"account.delete":          "删除账号",
+	"account.password_change": "修改密码",
+	"account.bootstrap":       "引导首个账号",
+	"session.revoke":          "撤销会话",
+	"comment.moderate":        "审核评论",
+	"comment.delete":          "删除评论",
+	"comment.bulk.approve":    "批量通过评论",
+	"comment.bulk.reject":     "批量拒绝评论",
+	"comment.bulk.spam":       "批量标记垃圾",
+	"comment.bulk.delete":     "批量删除评论",
 }
 
 // relativeTime renders a timestamp the way an operator reads it: "3 分钟前" for
@@ -921,13 +1177,14 @@ var uiPages = parseUIPages()
 
 func parseUIPages() map[string]*template.Template {
 	pages := map[string]*template.Template{}
-	for _, name := range []string{"login", "comments", "accounts", "audit"} {
+	for _, name := range []string{"login", "dashboard", "comments", "audit", "mail"} {
 		pages[name] = template.Must(template.New("layout").Funcs(template.FuncMap{
 			"fmtTime":     func(t time.Time) string { return t.Local().Format("2006-01-02 15:04") },
 			"relTime":     relativeTime,
 			"firstRune":   firstRune,
 			"statusLabel": statusLabel,
 			"statusBadge": statusBadge,
+			"actionLabel": actionLabel,
 			// eqStr compares a typed string (AccountStatus) with a template
 			// literal; the built-in eq refuses the mismatch.
 			"eqStr": func(value any, want string) bool { return fmt.Sprint(value) == want },
